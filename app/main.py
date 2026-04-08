@@ -2,13 +2,16 @@ import socket
 
 
 def main():
-    server = socket.create_server(("localhost", 9092), reuse_port=True)
-    client, addr = server.accept()
-    resp_msg_size = int('0').to_bytes(4, byteorder='big')
-    resp_msg_header = int('7').to_bytes(4, byteorder='big')
-    resp = resp_msg_size + resp_msg_header
-    client.send(resp)
-    client.close()
+    with (socket.create_server(("localhost", 9092), reuse_port=True)
+          as server_socket):
+        client, addr = server_socket.accept()
+        print(f"Accepted connection from {addr}")
+        client_request = client.recv(1024)
+        resp_msg_size = int('0').to_bytes(4, byteorder='big')
+        correlation_id = client_request[8:12]
+        resp = resp_msg_size + correlation_id
+        client.sendall(resp)
+
 
 
 
