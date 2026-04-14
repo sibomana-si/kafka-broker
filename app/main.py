@@ -17,15 +17,24 @@ async def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
             request_api_version = int.from_bytes(client_request[6:8], byteorder='big')
             if request_api_version in (0, 1, 2, 3, 4):
                 error_code = int(0).to_bytes(2, byteorder='big')
-                api_key_array_length = int(2).to_bytes(1, byteorder='big')
+                api_key_array_length = int(3).to_bytes(1, byteorder='big')
+
+                # Supported ApiVersion
                 api_key = int('18').to_bytes(2, byteorder='big')
                 api_key_min_version = int(0).to_bytes(2, byteorder='big')
                 api_key_max_version = int(4).to_bytes(2, byteorder='big')
-                api_key_tag_buffer = int(0).to_bytes(1, byteorder='big')
+                tag_buffer = int(0).to_bytes(1, byteorder='big')
+
+                # DescribeTopicsPartitions API
+                topics_api_key = int('75').to_bytes(2, byteorder='big')
+                topics_api_key_min_version = int(0).to_bytes(2, byteorder='big')
+                topics_api_key_max_version = int(0).to_bytes(2, byteorder='big')
                 throttle_time = int(0).to_bytes(4, byteorder='big')
-                throttle_time_tag_buffer = int(0).to_bytes(1, byteorder='big')
-                resp_body = error_code + api_key_array_length + api_key + api_key_min_version + api_key_max_version \
-                            + api_key_tag_buffer + throttle_time + throttle_time_tag_buffer
+
+                resp_body = error_code + api_key_array_length \
+                            + api_key + api_key_min_version + api_key_max_version + tag_buffer \
+                            + topics_api_key + topics_api_key_min_version + topics_api_key_max_version + tag_buffer \
+                            + throttle_time + tag_buffer
             else:
                 error_code = int(35).to_bytes(2, byteorder='big')
                 resp_body = error_code
