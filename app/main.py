@@ -1,13 +1,114 @@
 import asyncio
 import logging
+import uuid
 from asyncio import StreamReader, StreamWriter, Server
-
+from pathlib import Path
+from typing import Any
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 
-async def handle_api_version_requests(client_request: bytes) -> bytes:
+API_VERSIONS_KEY = 18
+DESCRIBE_TOPIC_PARTITIONS_KEY = 75
+CLUSTER_METADATA_FILE = "/tmp/kraft-combined-logs/__cluster_metadata-0/00000000000000000000.log"
+
+
+def extract_record_batch(cluster_metadata: bytes, record_batch_index: int) -> bytes:
+    record_batch_size = 12 + int.from_bytes(cluster_metadata[record_batch_index + 8:
+                                                             record_batch_index + 12],
+                                            byteorder='big')
+    return cluster_metadata[record_batch_index: record_batch_index + record_batch_size]
+
+
+def process_record_batch(record_batch: bytes) -> list:
+    record_list: list = []
+    num_records = int.from_bytes(record_batch[57:61], byteorder='big')
+    record_array = record_batch[61:]
+    for _ in range(num_records):
+        record_size = int.from_bytes(record_array[0:1], byteorder='big') // 2
+        if int.from_bytes(record_array[1:2], byteorder='big') == 0:
+            record = record_array[7:(record_size + 1)]
+            next_record_index = record_size + 1
+        else:
+            record = record_array[9: (record_size + 2)]
+            next_record_index = record_size + 2
+        record_list.append(record)
+        record_array = record_array[next_record_index:]
+    return record_list
+
+
+def process_record(record: bytes) -> dict[str, Any]:
+    processed_record: dict[str, Any] = dict()
+    record_type = int.from_bytes(record[0:1], byteorder='big')
+
+    if record_type == 2:
+        processed_record["type"] = "topic"
+        processed_record["partitions"] = []
+
+        topic_name_length = int.from_bytes(record[2:3], byteorder='big') - 1
+        topic_name = record[3: 3 + topic_name_length].decode("utf-8")
+        processed_record["topic_name"] = topic_name
+
+        topic_uuid_index = 3 + topic_name_length
+        topic_uuid = uuid.UUID(bytes=record[topic_uuid_index: topic_uuid_index + 16])
+        processed_record["topic_uuid"] = topic_uuid
+    elif record_type == 3:
+        processed_record["type"] = "partition"
+
+        partition_index = int.from_bytes(record[2:6], byteorder='big')
+        processed_record["partition_index"] = partition_index
+
+        topic_uuid = uuid.UUID(bytes=record[6:22])
+        processed_record["topic_uuid"] = topic_uuid
+
+        num_replicas = int.from_bytes(record[22:23], byteorder='big')
+        processed_record["num_replicas"] = num_replicas
+
+        num_isr = int.from_bytes(record[27:28], byteorder='big')
+        processed_record["num_isr"] = num_isr
+
+        leader_id = int.from_bytes(record[34:38], byteorder='big')
+        processed_record["leader_id"] = leader_id
+
+        leader_epoch = int.from_bytes(record[38:42], byteorder='big')
+        processed_record["leader_epoch"] = leader_epoch
+    else:
+        processed_record["type"] = "unknown"
+    return processed_record
+
+
+def parse_cluster_metadata(cluster_metadata: bytes) -> dict:
+    topics: dict[str, dict[str, Any]] = dict()
+    record_batch_index = 0
+    cluster_metadata_len = len(cluster_metadata)
+
+    while record_batch_index < cluster_metadata_len:
+        record_batch = extract_record_batch(cluster_metadata, record_batch_index)
+        #logger.info(f"record_batch: {record_batch_index}|{len(record_batch)}|{record_batch.hex()}")
+        record_list = process_record_batch(record_batch)
+        #logger.info(f"record_list size: {len(record_list)}")
+        for record in record_list:
+            #logger.info(f"record: {len(record)}|{record.hex()}")
+            processed_record = process_record(record)
+            if processed_record["type"] == "topic":
+                #logger.info(f"topic: {processed_record}")
+                topics[processed_record["topic_name"]] = processed_record
+            elif processed_record["type"] == "partition":
+                #logger.info(f"partition: {processed_record}")
+                for topic in topics:
+                    if processed_record["topic_uuid"] == topics[topic]["topic_uuid"]:
+                        topics[topic]["partitions"].append(processed_record)
+                        break
+                else:
+                    raise Exception(f"partition with no associated topic!|{processed_record}")
+            else:
+                logger.info(f'unknown record|{processed_record["type"]}|{record}')
+        record_batch_index += len(record_batch)
+    return topics
+
+
+def handle_api_version_requests(client_request: bytes) -> bytes:
     request_api_version = int.from_bytes(client_request[6:8], byteorder='big')
 
     if request_api_version in (0, 1, 2, 3, 4):
@@ -37,7 +138,17 @@ async def handle_api_version_requests(client_request: bytes) -> bytes:
     return resp_body
 
 
-async def handle_describe_topic_partition_requests(client_request: bytes) -> bytes:
+def handle_describe_topic_partition_requests(client_request: bytes) -> bytes:
+    if Path(CLUSTER_METADATA_FILE).is_file():
+        logger.info("Loading Cluster metadata file")
+        with open(CLUSTER_METADATA_FILE, 'rb') as f:
+            cluster_metadata = f.read()
+            logger.info(f"Cluster metadata: {len(cluster_metadata)}|{cluster_metadata.hex()}")
+            topics = parse_cluster_metadata(cluster_metadata)
+            logger.info(f"Cluster metadata file loaded successfully. Topics: {topics}")
+    else:
+        logger.info("Cluster metadata file not found.")
+
     tag_buffer = int(0).to_bytes(1, byteorder='big')
     throttle_time = int(0).to_bytes(4, byteorder='big')
     client_id_length = int.from_bytes(client_request[12:14], byteorder='big')
@@ -67,18 +178,50 @@ async def handle_describe_topic_partition_requests(client_request: bytes) -> byt
     topic_name = client_request[topic_name_index: (topic_name_index + topic_name_length - 1)]
     topics_array_length = client_request[topic_name_length_index - 1: topic_name_length_index]
 
-    topic_id = int(0).to_bytes(16, byteorder='big')
-    topic_error_code = int(3).to_bytes(2, byteorder='big')
+    partition_data = b''
     is_internal = int(0).to_bytes(1, byteorder='big')
-    partition_array_size = int(1).to_bytes(1, byteorder='big')
     topic_authorized_operations = int(0).to_bytes(4, byteorder='big')
     next_cursor = int(255).to_bytes(1, byteorder='big')
 
-    resp_body = tag_buffer + throttle_time + topics_array_length + topic_error_code \
-                + int(topic_name_length).to_bytes(1, byteorder='big') + topic_name \
-                + topic_id + is_internal + partition_array_size + topic_authorized_operations \
+    if topic_name.decode("utf-8") not in topics:
+        topic_id = int(0).to_bytes(16, byteorder='big')
+        topic_error_code = int(3).to_bytes(2, byteorder='big')
+        partition_array_size = int(1).to_bytes(1, byteorder='big')
+        partition_array = partition_array_size
+    else:
+        topic_details = topics[topic_name.decode("utf-8")]
+        topic_id = topic_details["topic_uuid"].bytes
+        topic_error_code = int(0).to_bytes(2, byteorder='big')
+
+        broker = int(1).to_bytes(1, byteorder='big')
+        elr = int(1).to_bytes(1, byteorder='big')
+        last_elr = int(1).to_bytes(1, byteorder='big')
+        offline_replicas = int(1).to_bytes(1, byteorder='big')
+
+        partition_array_size = (len(topic_details["partitions"]) + 1).to_bytes(1, byteorder='big')
+
+        for partition in topic_details["partitions"]:
+            partition_index = partition["partition_index"].to_bytes(4, byteorder='big')
+            leader_id = partition["leader_id"].to_bytes(4, byteorder='big')
+            leader_epoch = partition["leader_epoch"].to_bytes(4, byteorder='big')
+            replica_nodes = partition["num_replicas"].to_bytes(4, byteorder='big')
+            isr_nodes = partition["num_isr"].to_bytes(4, byteorder='big')
+
+            partition_data += (topic_error_code + partition_index + leader_id + leader_epoch + replica_nodes + broker
+                               + isr_nodes + broker + elr + last_elr + offline_replicas + tag_buffer)
+
+        partition_array = partition_array_size + partition_data
+
+
+    topic_data = topics_array_length + topic_error_code \
+                 + int(topic_name_length).to_bytes(1, byteorder='big') \
+                 + topic_name + topic_id + is_internal
+
+
+    resp_body = tag_buffer + throttle_time + topic_data + partition_array + topic_authorized_operations \
                 + tag_buffer + next_cursor + tag_buffer
 
+    logger.info(f"resp_body: {len(resp_body)}|{resp_body.hex()}")
     return resp_body
 
 
@@ -86,9 +229,9 @@ async def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
     client_address: str = writer.get_extra_info('peername')
     logger.info(f"Connection accepted from {client_address}")
 
-    request_handlers = {
-        18: handle_api_version_requests,
-        75: handle_describe_topic_partition_requests,
+    api_handlers = {
+        API_VERSIONS_KEY: handle_api_version_requests,
+        DESCRIBE_TOPIC_PARTITIONS_KEY: handle_describe_topic_partition_requests,
     }
 
     try:
@@ -98,8 +241,8 @@ async def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
             correlation_id = client_request[8:12]
             resp_body = b''
 
-            if request_api_key in request_handlers:
-                resp_body = await request_handlers[request_api_key](client_request)
+            if request_api_key in api_handlers:
+                resp_body = api_handlers[request_api_key](client_request)
             else:
                 logger.error(f"Unsupported API: {request_api_key}|{client_request.hex()}")
 
