@@ -14,6 +14,49 @@ DESCRIBE_TOPIC_PARTITIONS_KEY = 75
 CLUSTER_METADATA_FILE = "/tmp/kraft-combined-logs/__cluster_metadata-0/00000000000000000000.log"
 
 
+def get_response_topic_data(request_topic: str, topics: dict[str, dict[str, Any]]) -> bytes:
+    tag_buffer = int(0).to_bytes(1, byteorder='big')
+    is_internal = int(0).to_bytes(1, byteorder='big')
+    topic_authorized_operations = int(0).to_bytes(4, byteorder='big')
+    partition_data = b""
+
+    if request_topic not in topics:
+        resp_topic_id = int(0).to_bytes(16, byteorder='big')
+        resp_topic_error_code = int(3).to_bytes(2, byteorder='big')
+        partition_array_size = int(1).to_bytes(1, byteorder='big')
+        partition_array = partition_array_size
+    else:
+        resp_topic_details = topics[request_topic]
+        resp_topic_id = resp_topic_details["topic_uuid"].bytes
+        resp_topic_error_code = int(0).to_bytes(2, byteorder='big')
+
+        broker = int(1).to_bytes(1, byteorder='big')
+        elr = int(1).to_bytes(1, byteorder='big')
+        last_elr = int(1).to_bytes(1, byteorder='big')
+        offline_replicas = int(1).to_bytes(1, byteorder='big')
+
+        partition_array_size = (len(resp_topic_details["partitions"]) + 1).to_bytes(1, byteorder='big')
+
+        for partition in resp_topic_details["partitions"]:
+            partition_index = partition["partition_index"].to_bytes(4, byteorder='big')
+            leader_id = partition["leader_id"].to_bytes(4, byteorder='big')
+            leader_epoch = partition["leader_epoch"].to_bytes(4, byteorder='big')
+            replica_nodes = partition["num_replicas"].to_bytes(4, byteorder='big')
+            isr_nodes = partition["num_isr"].to_bytes(4, byteorder='big')
+
+            partition_data += (resp_topic_error_code + partition_index + leader_id + leader_epoch + replica_nodes + broker
+                               + isr_nodes + broker + elr + last_elr + offline_replicas + tag_buffer)
+
+        partition_array = partition_array_size + partition_data
+
+    resp_topic_name = request_topic.encode("utf-8")
+    resp_topic_name_length = int(len(resp_topic_name) + 1).to_bytes(1, byteorder='big')
+    resp_topic_data = resp_topic_error_code + resp_topic_name_length + resp_topic_name + resp_topic_id \
+                      + is_internal + partition_array + topic_authorized_operations + tag_buffer
+
+    return resp_topic_data
+
+
 def extract_record_batch(cluster_metadata: bytes, record_batch_index: int) -> bytes:
     record_batch_size = 12 + int.from_bytes(cluster_metadata[record_batch_index + 8:
                                                              record_batch_index + 12],
@@ -139,6 +182,7 @@ def handle_api_version_requests(client_request: bytes) -> bytes:
 
 
 def handle_describe_topic_partition_requests(client_request: bytes) -> bytes:
+    #logger.info(f"client request: {client_request.hex()}")
     if Path(CLUSTER_METADATA_FILE).is_file():
         logger.info("Loading Cluster metadata file")
         with open(CLUSTER_METADATA_FILE, 'rb') as f:
@@ -149,8 +193,7 @@ def handle_describe_topic_partition_requests(client_request: bytes) -> bytes:
     else:
         logger.info("Cluster metadata file not found.")
 
-    tag_buffer = int(0).to_bytes(1, byteorder='big')
-    throttle_time = int(0).to_bytes(4, byteorder='big')
+
     client_id_length = int.from_bytes(client_request[12:14], byteorder='big')
 
     field_sizes = {
@@ -164,64 +207,37 @@ def handle_describe_topic_partition_requests(client_request: bytes) -> bytes:
         "topic_name": 1
     }
 
-    topic_name_length_index = field_sizes["message"] + field_sizes["api_key"] + field_sizes["api_version"] \
-                              + field_sizes["correlation_id"] + field_sizes["client_id"] \
-                              + client_id_length \
-                              + field_sizes["tag_buffer"] + field_sizes["topics_array"]
-
-    topic_name_length = int.from_bytes(
-        client_request[topic_name_length_index:topic_name_length_index + field_sizes["topic_name"]],
-        byteorder='big'
-    )
-
-    topic_name_index = topic_name_length_index + field_sizes["topic_name"]
-    topic_name = client_request[topic_name_index: (topic_name_index + topic_name_length - 1)]
-    topics_array_length = client_request[topic_name_length_index - 1: topic_name_length_index]
-
-    partition_data = b''
-    is_internal = int(0).to_bytes(1, byteorder='big')
-    topic_authorized_operations = int(0).to_bytes(4, byteorder='big')
+    tag_buffer = int(0).to_bytes(1, byteorder='big')
+    throttle_time = int(0).to_bytes(4, byteorder='big')
     next_cursor = int(255).to_bytes(1, byteorder='big')
 
-    if topic_name.decode("utf-8") not in topics:
-        topic_id = int(0).to_bytes(16, byteorder='big')
-        topic_error_code = int(3).to_bytes(2, byteorder='big')
-        partition_array_size = int(1).to_bytes(1, byteorder='big')
-        partition_array = partition_array_size
-    else:
-        topic_details = topics[topic_name.decode("utf-8")]
-        topic_id = topic_details["topic_uuid"].bytes
-        topic_error_code = int(0).to_bytes(2, byteorder='big')
+    topic_array_index = field_sizes["message"] + field_sizes["api_key"] + field_sizes["api_version"] \
+                              + field_sizes["correlation_id"] + field_sizes["client_id"] \
+                              + client_id_length + field_sizes["tag_buffer"]
 
-        broker = int(1).to_bytes(1, byteorder='big')
-        elr = int(1).to_bytes(1, byteorder='big')
-        last_elr = int(1).to_bytes(1, byteorder='big')
-        offline_replicas = int(1).to_bytes(1, byteorder='big')
+    topics_array_length = client_request[topic_array_index: topic_array_index + 1]
 
-        partition_array_size = (len(topic_details["partitions"]) + 1).to_bytes(1, byteorder='big')
+    request_topics = []
+    topic_index = topic_array_index + 1
 
-        for partition in topic_details["partitions"]:
-            partition_index = partition["partition_index"].to_bytes(4, byteorder='big')
-            leader_id = partition["leader_id"].to_bytes(4, byteorder='big')
-            leader_epoch = partition["leader_epoch"].to_bytes(4, byteorder='big')
-            replica_nodes = partition["num_replicas"].to_bytes(4, byteorder='big')
-            isr_nodes = partition["num_isr"].to_bytes(4, byteorder='big')
+    for _ in range(int.from_bytes(topics_array_length, byteorder='big') - 1):
+        topic_name_length = int.from_bytes(client_request[topic_index: topic_index + 1], byteorder='big')
+        topic_name = client_request[topic_index + 1: topic_index + topic_name_length].decode("utf-8")
+        request_topics.append(topic_name)
+        topic_index += topic_name_length + 1
 
-            partition_data += (topic_error_code + partition_index + leader_id + leader_epoch + replica_nodes + broker
-                               + isr_nodes + broker + elr + last_elr + offline_replicas + tag_buffer)
+    resp_topics_array = topics_array_length
 
-        partition_array = partition_array_size + partition_data
+    for request_topic in sorted(request_topics):
+        #logger.info(f"request_topic: {request_topic}")
+        resp_topic_data = get_response_topic_data(request_topic, topics)
+        #logger.info(f"resp_topic_data: {len(resp_topic_data)}|{resp_topic_data.hex()}")
+        resp_topics_array += resp_topic_data
 
 
-    topic_data = topics_array_length + topic_error_code \
-                 + int(topic_name_length).to_bytes(1, byteorder='big') \
-                 + topic_name + topic_id + is_internal
+    resp_body = tag_buffer + throttle_time + resp_topics_array + next_cursor + tag_buffer
 
-
-    resp_body = tag_buffer + throttle_time + topic_data + partition_array + topic_authorized_operations \
-                + tag_buffer + next_cursor + tag_buffer
-
-    logger.info(f"resp_body: {len(resp_body)}|{resp_body.hex()}")
+    #logger.info(f"resp_body: {len(resp_body)}|{resp_body.hex()}")
     return resp_body
 
 
