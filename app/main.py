@@ -251,6 +251,16 @@ def handle_describe_topic_partition_requests(client_request: bytes) -> bytes:
 
 def handle_fetch_requests(client_request: bytes) -> bytes:
     #logger.info(f"client request: {len(client_request)}|{client_request.hex()}")
+    if Path(CLUSTER_METADATA_FILE).is_file():
+        logger.info("Loading Cluster metadata file")
+        with open(CLUSTER_METADATA_FILE, 'rb') as f:
+            cluster_metadata = f.read()
+            logger.info(f"Cluster metadata: {len(cluster_metadata)}|{cluster_metadata.hex()}")
+            topics = parse_cluster_metadata(cluster_metadata)
+            logger.info(f"Cluster metadata file loaded successfully. Topics: {topics}")
+    else:
+        logger.info("Cluster metadata file not found.")
+
     client_id_length = int.from_bytes(client_request[12:14], byteorder='big')
 
     field_sizes = {
@@ -284,25 +294,34 @@ def handle_fetch_requests(client_request: bytes) -> bytes:
     throttle_time = int(0).to_bytes(4, byteorder='big')
     error_code = int(0).to_bytes(2, byteorder='big')
 
+    for topic in topics:
+        if topics[topic]["topic_uuid"] == uuid.UUID(bytes=topic_uuid):
+            partition_error_code = int(0).to_bytes(2, byteorder='big')
+            partition_records_array = int(1).to_bytes(1, byteorder='big')
+            break
+    else:
+        partition_error_code = int(100).to_bytes(2, byteorder='big')
+        partition_records_array = int(0).to_bytes(1, byteorder='big')
+
     partitions_array_length = int(2).to_bytes(1, byteorder='big')
     partition_index = int(0).to_bytes(4, byteorder='big')
-    partition_error_code = int(100).to_bytes(2, byteorder='big')
+    #partition_error_code = int(100).to_bytes(2, byteorder='big')
     partition_high_watermark = int(0).to_bytes(8, byteorder='big')
     partitions_last_stable_offset = int(0).to_bytes(8, byteorder='big')
     partition_log_start_offset = int(0).to_bytes(8, byteorder='big')
     partition_aborted_transactions = int(1).to_bytes(1, byteorder='big')
     partition_preferred_read_replica = int(0).to_bytes(4, byteorder='big')
-    partition_records = int(0).to_bytes(1, byteorder='big')
-    partition_diverging_epoch = int(0).to_bytes(1, byteorder='big')
-    partition_current_leader = int(0).to_bytes(1, byteorder='big')
-    partition_snapshot_id = int(0).to_bytes(1, byteorder='big')
+    #partition_records_array = int(0).to_bytes(1, byteorder='big')
+    partition_diverging_epoch_array = int(0).to_bytes(1, byteorder='big')
+    partition_current_leader_array = int(0).to_bytes(1, byteorder='big')
+    partition_snapshot_id_array = int(0).to_bytes(1, byteorder='big')
 
     partitions_array = partitions_array_length + partition_index + partition_error_code \
                        + partition_high_watermark + partitions_last_stable_offset \
                        + partition_log_start_offset + partition_aborted_transactions \
-                       + partition_preferred_read_replica + partition_records \
-                       + partition_diverging_epoch + partition_current_leader + partition_snapshot_id \
-                       + tag_buffer
+                       + partition_preferred_read_replica + partition_records_array \
+                       + partition_diverging_epoch_array + partition_current_leader_array \
+                       + partition_snapshot_id_array + tag_buffer
     #logger.info(f"partitions_array: {len(partitions_array)}|{partitions_array.hex()}")
     topics_array = topics_array_length + topic_uuid + partitions_array + tag_buffer
     #logger.info(f"topics_array: {len(topics_array)}|{topics_array.hex()}")
@@ -313,6 +332,7 @@ def handle_fetch_requests(client_request: bytes) -> bytes:
 
     #logger.info(f"fetch resp: {len(resp_body)}|{resp_body.hex()}")
     return resp_body
+
 
 async def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
     client_address: str = writer.get_extra_info('peername')
