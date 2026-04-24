@@ -250,17 +250,68 @@ def handle_describe_topic_partition_requests(client_request: bytes) -> bytes:
 
 
 def handle_fetch_requests(client_request: bytes) -> bytes:
+    #logger.info(f"client request: {len(client_request)}|{client_request.hex()}")
+    client_id_length = int.from_bytes(client_request[12:14], byteorder='big')
+
+    field_sizes = {
+        "message": 4,
+        "api_key": 2,
+        "api_version": 2,
+        "correlation_id": 4,
+        "client_id": 2,
+        "tag_buffer": 1,
+        "max_wait_ms": 4,
+        "min_bytes": 4,
+        "max_bytes": 4,
+        "isolation_level": 1,
+        "session_id": 4,
+        "session_epoch": 4
+    }
+
+    session_id_index = field_sizes["message"] + field_sizes["api_key"] + field_sizes["api_version"] \
+                        + field_sizes["correlation_id"] + field_sizes["client_id"] \
+                        + client_id_length + field_sizes["tag_buffer"] \
+                        + field_sizes["max_wait_ms"] + field_sizes["min_bytes"] + field_sizes["max_bytes"] \
+                        + field_sizes["isolation_level"]
+
+    topics_array_index =  session_id_index + field_sizes["session_id"] + field_sizes["session_epoch"]
+
+    session_id = client_request[session_id_index: session_id_index + 4]
+    topics_array_length = client_request[topics_array_index: topics_array_index + 1]
+    topic_uuid = client_request[topics_array_index + 1: topics_array_index + 17]
+
     tag_buffer = int(0).to_bytes(1, byteorder='big')
     throttle_time = int(0).to_bytes(4, byteorder='big')
     error_code = int(0).to_bytes(2, byteorder='big')
-    session_id = int(0).to_bytes(4, byteorder='big')
-    topics_array = int(1).to_bytes(1, byteorder='big')
+
+    partitions_array_length = int(2).to_bytes(1, byteorder='big')
+    partition_index = int(0).to_bytes(4, byteorder='big')
+    partition_error_code = int(100).to_bytes(2, byteorder='big')
+    partition_high_watermark = int(0).to_bytes(8, byteorder='big')
+    partitions_last_stable_offset = int(0).to_bytes(8, byteorder='big')
+    partition_log_start_offset = int(0).to_bytes(8, byteorder='big')
+    partition_aborted_transactions = int(1).to_bytes(1, byteorder='big')
+    partition_preferred_read_replica = int(0).to_bytes(4, byteorder='big')
+    partition_records = int(0).to_bytes(1, byteorder='big')
+    partition_diverging_epoch = int(0).to_bytes(1, byteorder='big')
+    partition_current_leader = int(0).to_bytes(1, byteorder='big')
+    partition_snapshot_id = int(0).to_bytes(1, byteorder='big')
+
+    partitions_array = partitions_array_length + partition_index + partition_error_code \
+                       + partition_high_watermark + partitions_last_stable_offset \
+                       + partition_log_start_offset + partition_aborted_transactions \
+                       + partition_preferred_read_replica + partition_records \
+                       + partition_diverging_epoch + partition_current_leader + partition_snapshot_id \
+                       + tag_buffer
+    #logger.info(f"partitions_array: {len(partitions_array)}|{partitions_array.hex()}")
+    topics_array = topics_array_length + topic_uuid + partitions_array + tag_buffer
+    #logger.info(f"topics_array: {len(topics_array)}|{topics_array.hex()}")
     node_endpoints_array = int(1).to_bytes(1, byteorder='big')
 
     resp_body = tag_buffer + throttle_time + error_code + session_id \
-                + topics_array + tag_buffer \
-                + node_endpoints_array + tag_buffer
+                + topics_array  + node_endpoints_array + tag_buffer
 
+    #logger.info(f"fetch resp: {len(resp_body)}|{resp_body.hex()}")
     return resp_body
 
 async def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
