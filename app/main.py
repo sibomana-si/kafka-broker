@@ -156,23 +156,30 @@ def handle_api_version_requests(client_request: bytes) -> bytes:
 
     if request_api_version in (0, 1, 2, 3, 4):
         error_code = int(0).to_bytes(2, byteorder='big')
-        api_key_array_length = int(3).to_bytes(1, byteorder='big')
+        api_key_array_length = int(4).to_bytes(1, byteorder='big')
         tag_buffer = int(0).to_bytes(1, byteorder='big')
         throttle_time = int(0).to_bytes(4, byteorder='big')
 
-        # Supported ApiVersion
-        api_key = int('18').to_bytes(2, byteorder='big')
-        api_key_min_version = int(0).to_bytes(2, byteorder='big')
-        api_key_max_version = int(4).to_bytes(2, byteorder='big')
+        # Fetch API
+        fetch_api_key = int('1').to_bytes(2, byteorder='big')
+        fetch_api_key_min = int(0).to_bytes(2, byteorder='big')
+        fetch_api_key_max = int(16).to_bytes(2, byteorder='big')
 
-        # Supported DescribeTopicPartitions API
+        # ApiVersions API
+        versions_api_key = int('18').to_bytes(2, byteorder='big')
+        versions_api_key_min = int(0).to_bytes(2, byteorder='big')
+        versions_api_key_max = int(4).to_bytes(2, byteorder='big')
+
+        # DescribeTopicPartitions API
         topics_api_key = int('75').to_bytes(2, byteorder='big')
-        topics_api_key_min_version = int(0).to_bytes(2, byteorder='big')
-        topics_api_key_max_version = int(0).to_bytes(2, byteorder='big')
+        topics_api_key_min = int(0).to_bytes(2, byteorder='big')
+        topics_api_key_max = int(0).to_bytes(2, byteorder='big')
+
 
         resp_body = error_code + api_key_array_length \
-                    + api_key + api_key_min_version + api_key_max_version + tag_buffer \
-                    + topics_api_key + topics_api_key_min_version + topics_api_key_max_version + tag_buffer \
+                    + versions_api_key + versions_api_key_min + versions_api_key_max + tag_buffer \
+                    + topics_api_key + topics_api_key_min + topics_api_key_max + tag_buffer \
+                    + fetch_api_key + fetch_api_key_min + fetch_api_key_max + tag_buffer \
                     + throttle_time + tag_buffer
     else:
         error_code = int(35).to_bytes(2, byteorder='big')
