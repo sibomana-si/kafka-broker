@@ -9,6 +9,7 @@ logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 
+FETCH_KEY = 1
 API_VERSIONS_KEY = 18
 DESCRIBE_TOPIC_PARTITIONS_KEY = 75
 CLUSTER_METADATA_FILE = "/tmp/kraft-combined-logs/__cluster_metadata-0/00000000000000000000.log"
@@ -248,6 +249,20 @@ def handle_describe_topic_partition_requests(client_request: bytes) -> bytes:
     return resp_body
 
 
+def handle_fetch_requests(client_request: bytes) -> bytes:
+    tag_buffer = int(0).to_bytes(1, byteorder='big')
+    throttle_time = int(0).to_bytes(4, byteorder='big')
+    error_code = int(0).to_bytes(2, byteorder='big')
+    session_id = int(0).to_bytes(4, byteorder='big')
+    topics_array = int(1).to_bytes(1, byteorder='big')
+    node_endpoints_array = int(1).to_bytes(1, byteorder='big')
+
+    resp_body = tag_buffer + throttle_time + error_code + session_id \
+                + topics_array + tag_buffer \
+                + node_endpoints_array + tag_buffer
+
+    return resp_body
+
 async def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
     client_address: str = writer.get_extra_info('peername')
     logger.info(f"Connection accepted from {client_address}")
@@ -255,6 +270,7 @@ async def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
     api_handlers = {
         API_VERSIONS_KEY: handle_api_version_requests,
         DESCRIBE_TOPIC_PARTITIONS_KEY: handle_describe_topic_partition_requests,
+        FETCH_KEY: handle_fetch_requests
     }
 
     try:
