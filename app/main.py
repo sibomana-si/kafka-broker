@@ -13,7 +13,8 @@ FETCH_KEY = 1
 API_VERSIONS_KEY = 18
 DESCRIBE_TOPIC_PARTITIONS_KEY = 75
 CLUSTER_METADATA_FILE = "/tmp/kraft-combined-logs/__cluster_metadata-0/00000000000000000000.log"
-
+LOG_FILES_DIR = "/tmp/kraft-combined-logs"
+LOG_FILE_NAME = "00000000000000000000.log"
 
 def get_response_topic_data(request_topic: str, topics: dict[str, dict[str, Any]]) -> bytes:
     tag_buffer = int(0).to_bytes(1, byteorder='big')
@@ -250,7 +251,7 @@ def handle_describe_topic_partition_requests(client_request: bytes) -> bytes:
 
 
 def handle_fetch_requests(client_request: bytes) -> bytes:
-    #logger.info(f"client request: {len(client_request)}|{client_request.hex()}")
+    logger.info(f"client request: {len(client_request)}|{client_request.hex()}")
     if Path(CLUSTER_METADATA_FILE).is_file():
         logger.info("Loading Cluster metadata file")
         with open(CLUSTER_METADATA_FILE, 'rb') as f:
@@ -297,7 +298,16 @@ def handle_fetch_requests(client_request: bytes) -> bytes:
     for topic in topics:
         if topics[topic]["topic_uuid"] == uuid.UUID(bytes=topic_uuid):
             partition_error_code = int(0).to_bytes(2, byteorder='big')
-            partition_records_array = int(1).to_bytes(1, byteorder='big')
+            record_batch_log = LOG_FILES_DIR + "/" + topic + "-0/" + LOG_FILE_NAME
+            if Path(record_batch_log).is_file() and Path(record_batch_log).stat().st_size > 0:
+                logger.info(f"record batch Log file found: {record_batch_log}")
+                with open(record_batch_log, 'rb') as log_file:
+                    record_batch = log_file.read()
+                    partition_records_array = int(len(record_batch) + 1).to_bytes(1, byteorder='big')
+                    partition_records_array += record_batch
+            else:
+                partition_records_array = int(1).to_bytes(1, byteorder='big')
+            logger.info(f"partition_records_array: {len(partition_records_array)}|{partition_records_array.hex()}")
             break
     else:
         partition_error_code = int(100).to_bytes(2, byteorder='big')
@@ -305,13 +315,11 @@ def handle_fetch_requests(client_request: bytes) -> bytes:
 
     partitions_array_length = int(2).to_bytes(1, byteorder='big')
     partition_index = int(0).to_bytes(4, byteorder='big')
-    #partition_error_code = int(100).to_bytes(2, byteorder='big')
     partition_high_watermark = int(0).to_bytes(8, byteorder='big')
     partitions_last_stable_offset = int(0).to_bytes(8, byteorder='big')
     partition_log_start_offset = int(0).to_bytes(8, byteorder='big')
     partition_aborted_transactions = int(1).to_bytes(1, byteorder='big')
     partition_preferred_read_replica = int(0).to_bytes(4, byteorder='big')
-    #partition_records_array = int(0).to_bytes(1, byteorder='big')
     partition_diverging_epoch_array = int(0).to_bytes(1, byteorder='big')
     partition_current_leader_array = int(0).to_bytes(1, byteorder='big')
     partition_snapshot_id_array = int(0).to_bytes(1, byteorder='big')
@@ -322,15 +330,15 @@ def handle_fetch_requests(client_request: bytes) -> bytes:
                        + partition_preferred_read_replica + partition_records_array \
                        + partition_diverging_epoch_array + partition_current_leader_array \
                        + partition_snapshot_id_array + tag_buffer
-    #logger.info(f"partitions_array: {len(partitions_array)}|{partitions_array.hex()}")
+    logger.info(f"partitions_array: {len(partitions_array)}|{partitions_array.hex()}")
     topics_array = topics_array_length + topic_uuid + partitions_array + tag_buffer
-    #logger.info(f"topics_array: {len(topics_array)}|{topics_array.hex()}")
+    logger.info(f"topics_array: {len(topics_array)}|{topics_array.hex()}")
     node_endpoints_array = int(1).to_bytes(1, byteorder='big')
 
     resp_body = tag_buffer + throttle_time + error_code + session_id \
                 + topics_array  + node_endpoints_array + tag_buffer
 
-    #logger.info(f"fetch resp: {len(resp_body)}|{resp_body.hex()}")
+    logger.info(f"fetch resp: {len(resp_body)}|{resp_body.hex()}")
     return resp_body
 
 
