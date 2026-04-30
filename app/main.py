@@ -407,14 +407,29 @@ def handle_produce_requests(client_request: bytes) -> bytes:
 
     tag_buffer = int(0).to_bytes(1, byteorder='big')
     throttle_time = int(0).to_bytes(4, byteorder='big')
-    #error_code = int(0).to_bytes(2, byteorder='big')
+
+    valid_topic_and_partition = False
+
+    if topic_name in topics:
+        partition_idx = int.from_bytes(partition_index, byteorder='big')
+        for partition in topics[topic_name]["partitions"]:
+            if partition_idx == partition["partition_index"]:
+                valid_topic_and_partition = True
+                logger.info(f"Valid topic and partition. Topic: {topic_name}, Partition: {partition_idx}")
+                break
+
+    if valid_topic_and_partition:
+        error_code = int(0).to_bytes(2, byteorder='big')
+        base_offset = int(0).to_bytes(8, byteorder='big')
+        log_start_offset = int(0).to_bytes(8, byteorder='big')
+    else:
+        error_code = int(3).to_bytes(2, byteorder='big')
+        base_offset = int(-1).to_bytes(8, byteorder='big', signed=True)
+        log_start_offset = int(-1).to_bytes(8, byteorder='big', signed=True)
 
     topics_data = topics_array_length + topic_name_size.to_bytes(1, byteorder='big') + topic_name.encode('utf-8')
-    #invalid_partition_index = int(-1).to_bytes(4, byteorder='big', signed=True)
-    error_code = int(3).to_bytes(2, byteorder='big')
-    base_offset = int(-1).to_bytes(8, byteorder='big', signed=True)
+
     log_append_time = int(-1).to_bytes(8, byteorder='big', signed=True)
-    log_start_offset = int(-1).to_bytes(8, byteorder='big', signed=True)
     records_array = int(1).to_bytes(1, byteorder='big')
     error_message = int(0).to_bytes(1, byteorder='big')
 
