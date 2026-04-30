@@ -368,7 +368,64 @@ def handle_fetch_requests(client_request: bytes) -> bytes:
 
 
 def handle_produce_requests(client_request: bytes) -> bytes:
-    return b""
+    if Path(CLUSTER_METADATA_FILE).is_file():
+        logger.info("Loading Cluster metadata file")
+        with open(CLUSTER_METADATA_FILE, 'rb') as f:
+            cluster_metadata = f.read()
+            logger.info(f"Cluster metadata: {len(cluster_metadata)}|{cluster_metadata.hex()}")
+            topics = parse_cluster_metadata(cluster_metadata)
+            logger.info(f"Cluster metadata file loaded successfully. Topics: {topics}")
+    else:
+        logger.info("Cluster metadata file not found.")
+
+    client_id_length = int.from_bytes(client_request[12:14], byteorder='big')
+
+    field_sizes = {
+        "message": 4,
+        "api_key": 2,
+        "api_version": 2,
+        "correlation_id": 4,
+        "client_id": 2,
+        "tag_buffer": 1,
+        "transactional_id": 1,
+        "required_acks": 2,
+        "timeout": 4
+    }
+
+    topics_array_index = field_sizes["message"] + field_sizes["api_key"] + field_sizes["api_version"] \
+                        + field_sizes["correlation_id"] + field_sizes["client_id"] \
+                        + client_id_length + field_sizes["tag_buffer"] \
+                        + field_sizes["transactional_id"] + field_sizes["required_acks"] + field_sizes["timeout"]
+
+    topics_array_length = client_request[topics_array_index: topics_array_index + 1]
+    topic_name_size = int.from_bytes(client_request[topics_array_index + 1: topics_array_index + 2], byteorder='big')
+    topic_name = client_request[topics_array_index + 2: (topics_array_index + topic_name_size + 1)].decode("utf-8")
+
+    partition_array_index = topics_array_index + topic_name_size + 1
+    partitions_array_length = client_request[partition_array_index: partition_array_index + 1]
+    partition_index = client_request[partition_array_index + 1: partition_array_index + 5]
+
+    tag_buffer = int(0).to_bytes(1, byteorder='big')
+    throttle_time = int(0).to_bytes(4, byteorder='big')
+    #error_code = int(0).to_bytes(2, byteorder='big')
+
+    topics_data = topics_array_length + topic_name_size.to_bytes(1, byteorder='big') + topic_name.encode('utf-8')
+    #invalid_partition_index = int(-1).to_bytes(4, byteorder='big', signed=True)
+    error_code = int(3).to_bytes(2, byteorder='big')
+    base_offset = int(-1).to_bytes(8, byteorder='big', signed=True)
+    log_append_time = int(-1).to_bytes(8, byteorder='big', signed=True)
+    log_start_offset = int(-1).to_bytes(8, byteorder='big', signed=True)
+    records_array = int(1).to_bytes(1, byteorder='big')
+    error_message = int(0).to_bytes(1, byteorder='big')
+
+    partitions_array = partitions_array_length + partition_index + error_code + base_offset \
+                       + log_append_time + log_start_offset + records_array + error_message + tag_buffer
+
+    topics_array = topics_data + partitions_array + tag_buffer
+
+    resp_body = tag_buffer + topics_array + throttle_time + tag_buffer
+    logger.info(f"produce resp: {len(resp_body)}|{resp_body.hex()}")
+    return resp_body
 
 
 async def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
