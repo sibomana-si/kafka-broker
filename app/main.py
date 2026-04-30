@@ -9,6 +9,7 @@ from typing import Any
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
+PRODUCE_KEY = 0
 FETCH_KEY = 1
 API_VERSIONS_KEY = 18
 DESCRIBE_TOPIC_PARTITIONS_KEY = 75
@@ -175,30 +176,33 @@ def handle_api_version_requests(client_request: bytes) -> bytes:
 
     if request_api_version in (0, 1, 2, 3, 4):
         error_code = int(0).to_bytes(2, byteorder='big')
-        api_key_array_length = int(4).to_bytes(1, byteorder='big')
+        api_key_array_length = int(5).to_bytes(1, byteorder='big')
+        api_key_min = int(0).to_bytes(2, byteorder='big')
         tag_buffer = int(0).to_bytes(1, byteorder='big')
         throttle_time = int(0).to_bytes(4, byteorder='big')
 
+        # Produce API
+        produce_api_key = int(0).to_bytes(2, byteorder='big')
+        produce_api_key_max = int(11).to_bytes(2, byteorder='big')
+
         # Fetch API
         fetch_api_key = int('1').to_bytes(2, byteorder='big')
-        fetch_api_key_min = int(0).to_bytes(2, byteorder='big')
         fetch_api_key_max = int(16).to_bytes(2, byteorder='big')
 
         # ApiVersions API
         versions_api_key = int('18').to_bytes(2, byteorder='big')
-        versions_api_key_min = int(0).to_bytes(2, byteorder='big')
         versions_api_key_max = int(4).to_bytes(2, byteorder='big')
 
         # DescribeTopicPartitions API
         topics_api_key = int('75').to_bytes(2, byteorder='big')
-        topics_api_key_min = int(0).to_bytes(2, byteorder='big')
         topics_api_key_max = int(0).to_bytes(2, byteorder='big')
 
 
         resp_body = error_code + api_key_array_length \
-                    + versions_api_key + versions_api_key_min + versions_api_key_max + tag_buffer \
-                    + topics_api_key + topics_api_key_min + topics_api_key_max + tag_buffer \
-                    + fetch_api_key + fetch_api_key_min + fetch_api_key_max + tag_buffer \
+                    + versions_api_key + api_key_min + versions_api_key_max + tag_buffer \
+                    + topics_api_key + api_key_min + topics_api_key_max + tag_buffer \
+                    + fetch_api_key + api_key_min + fetch_api_key_max + tag_buffer \
+                    + produce_api_key + api_key_min + produce_api_key_max + tag_buffer \
                     + throttle_time + tag_buffer
     else:
         error_code = int(35).to_bytes(2, byteorder='big')
@@ -363,6 +367,10 @@ def handle_fetch_requests(client_request: bytes) -> bytes:
     return resp_body
 
 
+def handle_produce_requests(client_request: bytes) -> bytes:
+    return b""
+
+
 async def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
     client_address: str = writer.get_extra_info('peername')
     logger.info(f"Connection accepted from {client_address}")
@@ -370,7 +378,8 @@ async def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
     api_handlers = {
         API_VERSIONS_KEY: handle_api_version_requests,
         DESCRIBE_TOPIC_PARTITIONS_KEY: handle_describe_topic_partition_requests,
-        FETCH_KEY: handle_fetch_requests
+        FETCH_KEY: handle_fetch_requests,
+        PRODUCE_KEY: handle_produce_requests
     }
 
     try:
