@@ -5,9 +5,9 @@ from asyncio import StreamReader, StreamWriter, Server
 from pathlib import Path
 from typing import Any
 
+
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
-
 
 FETCH_KEY = 1
 API_VERSIONS_KEY = 18
@@ -15,6 +15,23 @@ DESCRIBE_TOPIC_PARTITIONS_KEY = 75
 CLUSTER_METADATA_FILE = "/tmp/kraft-combined-logs/__cluster_metadata-0/00000000000000000000.log"
 LOG_FILES_DIR = "/tmp/kraft-combined-logs"
 LOG_FILE_NAME = "00000000000000000000.log"
+
+
+def encode_kafka_unsigned_varint(value: int) -> bytes:
+    """Encode an integer as Kafka UVARINT (unsigned LEB128)."""
+    if value < 0:
+        raise ValueError("UVARINT cannot encode negative values")
+    encoded = bytearray()
+    while True:
+        to_write = value & 0x7F
+        value >>= 7
+        if value:
+            encoded.append(to_write | 0x80)
+        else:
+            encoded.append(to_write)
+            break
+    return bytes(encoded)
+
 
 def get_response_topic_data(request_topic: str, topics: dict[str, dict[str, Any]]) -> bytes:
     tag_buffer = int(0).to_bytes(1, byteorder='big')
@@ -251,7 +268,7 @@ def handle_describe_topic_partition_requests(client_request: bytes) -> bytes:
 
 
 def handle_fetch_requests(client_request: bytes) -> bytes:
-    logger.info(f"client request: {len(client_request)}|{client_request.hex()}")
+    #logger.info(f"client request: {len(client_request)}|{client_request.hex()}")
     if Path(CLUSTER_METADATA_FILE).is_file():
         logger.info("Loading Cluster metadata file")
         with open(CLUSTER_METADATA_FILE, 'rb') as f:
@@ -290,6 +307,8 @@ def handle_fetch_requests(client_request: bytes) -> bytes:
     session_id = client_request[session_id_index: session_id_index + 4]
     topics_array_length = client_request[topics_array_index: topics_array_index + 1]
     topic_uuid = client_request[topics_array_index + 1: topics_array_index + 17]
+    partitions_array_length = client_request[topics_array_index + 17: topics_array_index + 18]
+    partition_index = client_request[topics_array_index + 18: topics_array_index + 22]
 
     tag_buffer = int(0).to_bytes(1, byteorder='big')
     throttle_time = int(0).to_bytes(4, byteorder='big')
@@ -297,24 +316,26 @@ def handle_fetch_requests(client_request: bytes) -> bytes:
 
     for topic in topics:
         if topics[topic]["topic_uuid"] == uuid.UUID(bytes=topic_uuid):
+            #logger.info(f"request topic: {topic}")
             partition_error_code = int(0).to_bytes(2, byteorder='big')
-            record_batch_log = LOG_FILES_DIR + "/" + topic + "-0/" + LOG_FILE_NAME
+            record_batch_log_dir = LOG_FILES_DIR + "/" + topic \
+                                   + "-" + str(int.from_bytes(partition_index, byteorder='big')) \
+                                   + "/"
+            record_batch_log = record_batch_log_dir + LOG_FILE_NAME
+            partition_records_array = b""
             if Path(record_batch_log).is_file() and Path(record_batch_log).stat().st_size > 0:
-                logger.info(f"record batch Log file found: {record_batch_log}")
+                #logger.info(f"record batch log file found: {record_batch_log}")
                 with open(record_batch_log, 'rb') as log_file:
-                    record_batch = log_file.read()
-                    partition_records_array = int(len(record_batch) + 1).to_bytes(1, byteorder='big')
-                    partition_records_array += record_batch
-            else:
-                partition_records_array = int(1).to_bytes(1, byteorder='big')
-            logger.info(f"partition_records_array: {len(partition_records_array)}|{partition_records_array.hex()}")
+                    partition_records_array = log_file.read()
+
+            partition_records_array = encode_kafka_unsigned_varint(len(partition_records_array) + 1) \
+                                      + partition_records_array
+            #logger.info(f"partition_records_array: {len(partition_records_array)}|{partition_records_array.hex()}")
             break
     else:
         partition_error_code = int(100).to_bytes(2, byteorder='big')
         partition_records_array = int(0).to_bytes(1, byteorder='big')
 
-    partitions_array_length = int(2).to_bytes(1, byteorder='big')
-    partition_index = int(0).to_bytes(4, byteorder='big')
     partition_high_watermark = int(0).to_bytes(8, byteorder='big')
     partitions_last_stable_offset = int(0).to_bytes(8, byteorder='big')
     partition_log_start_offset = int(0).to_bytes(8, byteorder='big')
@@ -330,15 +351,15 @@ def handle_fetch_requests(client_request: bytes) -> bytes:
                        + partition_preferred_read_replica + partition_records_array \
                        + partition_diverging_epoch_array + partition_current_leader_array \
                        + partition_snapshot_id_array + tag_buffer
-    logger.info(f"partitions_array: {len(partitions_array)}|{partitions_array.hex()}")
+    #logger.info(f"partitions_array: {len(partitions_array)}|{partitions_array.hex()}")
     topics_array = topics_array_length + topic_uuid + partitions_array + tag_buffer
-    logger.info(f"topics_array: {len(topics_array)}|{topics_array.hex()}")
+    #logger.info(f"topics_array: {len(topics_array)}|{topics_array.hex()}")
     node_endpoints_array = int(1).to_bytes(1, byteorder='big')
 
     resp_body = tag_buffer + throttle_time + error_code + session_id \
                 + topics_array  + node_endpoints_array + tag_buffer
 
-    logger.info(f"fetch resp: {len(resp_body)}|{resp_body.hex()}")
+    #logger.info(f"fetch resp: {len(resp_body)}|{resp_body.hex()}")
     return resp_body
 
 
