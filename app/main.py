@@ -3,6 +3,7 @@ import logging
 import uuid
 from asyncio import StreamReader, StreamWriter, Server
 from pathlib import Path
+from sys import byteorder
 from typing import Any
 
 
@@ -32,6 +33,28 @@ def encode_kafka_unsigned_varint(value: int) -> bytes:
             encoded.append(to_write)
             break
     return bytes(encoded)
+
+'''
+def varint_encoding_size(value: int) -> int:
+    num_bytes = 0
+    if value < 0:
+        raise ValueError("UVARINT cannot encode negative values")
+    elif 0 <= value <= 127:
+        num_bytes = 1
+    else:
+        while value:
+            num_bytes += 1
+            value >>=7
+
+    return num_bytes
+'''
+
+def varint_encoding_size(request: bytes, index: int) -> int:
+    num_bytes = 1
+    while int.from_bytes(request[index: index + 1], byteorder='big') != 0:
+        num_bytes += 1
+        index += 1
+    return num_bytes
 
 
 def get_response_topic_data(request_topic: str, topics: dict[str, dict[str, Any]]) -> bytes:
@@ -405,6 +428,16 @@ def handle_produce_requests(client_request: bytes) -> bytes:
     partitions_array_length = client_request[partition_array_index: partition_array_index + 1]
     partition_index = client_request[partition_array_index + 1: partition_array_index + 5]
 
+    record_batch_array_index = partition_array_index + 5
+    record_batch_size_length = varint_encoding_size(client_request, record_batch_array_index + 1)
+    logger.info(f"record_batch_size_length: {record_batch_size_length}")
+    record_batch_size = int.from_bytes(client_request[record_batch_array_index: record_batch_array_index + record_batch_size_length],
+                                       byteorder='big')
+    logger.info(f"record_batch_size: {record_batch_size}")
+    record_batch_index = record_batch_array_index + record_batch_size_length
+    record_batch = client_request[record_batch_index: record_batch_index + record_batch_size]
+    logger.info(f"record_batch: {len(record_batch)}|{record_batch.hex()}")
+
     tag_buffer = int(0).to_bytes(1, byteorder='big')
     throttle_time = int(0).to_bytes(4, byteorder='big')
 
@@ -422,6 +455,15 @@ def handle_produce_requests(client_request: bytes) -> bytes:
         error_code = int(0).to_bytes(2, byteorder='big')
         base_offset = int(0).to_bytes(8, byteorder='big')
         log_start_offset = int(0).to_bytes(8, byteorder='big')
+
+        record_batch_log_file = LOG_FILES_DIR \
+                                + "/" + topic_name + "-" + str(int.from_bytes(partition_index, byteorder='big')) \
+                                + "/" + LOG_FILE_NAME
+
+        with open(record_batch_log_file, 'wb') as log_file:
+            bytes_written = log_file.write(record_batch)
+            logger.info(f"Wrote {bytes_written} to record batch log file: {record_batch_log_file}")
+
     else:
         error_code = int(3).to_bytes(2, byteorder='big')
         base_offset = int(-1).to_bytes(8, byteorder='big', signed=True)
