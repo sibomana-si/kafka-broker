@@ -19,6 +19,40 @@ LOG_FILES_DIR = "/tmp/kraft-combined-logs"
 LOG_FILE_NAME = "00000000000000000000.log"
 
 
+def produce_topic_response(client_request: bytes,
+                           topic_index: int,
+                           topics: dict,
+                           ) -> tuple[bytes, int]:
+
+    tag_buffer = int(0).to_bytes(1, byteorder='big')
+    topic_name_size = int.from_bytes(client_request[topic_index: topic_index + 1], byteorder='big')
+    topic_name = client_request[topic_index + 1: topic_index + topic_name_size].decode("utf-8")
+
+    partition_array_index = topic_index + topic_name_size
+    partitions_array_length = client_request[partition_array_index: partition_array_index + 1]
+    partitions_resp_array = partitions_array_length
+    partitions_array_size = int.from_bytes(partitions_array_length, byteorder='big') - 1
+    partition_id_index = partition_array_index + 1
+
+    for _ in range(partitions_array_size):
+        #logger.info(f"partition_array_index: {partition_id_index} | {partitions_array_size}")
+        partition_resp, next_partition_id_index = produce_partition_response(client_request, partition_id_index, topic_name,
+                                                                         topics)
+        #logger.info(f"partition_resp: {partition_resp.hex()}")
+        partitions_resp_array += partition_resp
+        partition_id_index = next_partition_id_index
+
+    #logger.info(f"partitions_resp_array: {partitions_resp_array.hex()}")
+
+    topics_resp = topic_name_size.to_bytes(1, byteorder='big') + topic_name.encode('utf-8') \
+                  + partitions_resp_array + tag_buffer
+    #logger.info(f"topics resp: {len(topics_resp)}|{topics_resp.hex()}")
+
+    topics_next_index = partition_id_index + 1
+
+    return topics_resp, topics_next_index
+
+
 def produce_partition_response(client_request: bytes,
                                partition_id_index: int,
                                topic_name: str,
@@ -28,18 +62,18 @@ def produce_partition_response(client_request: bytes,
     tag_buffer = int(0).to_bytes(1, byteorder='big')
     partition_id_size_length = 4
     partition_index = client_request[partition_id_index: partition_id_index + partition_id_size_length]
-    logger.info(f"partition_index: {int.from_bytes(partition_index, byteorder='big')}")
+    #logger.info(f"partition_index: {int.from_bytes(partition_index, byteorder='big')}")
 
     record_batch_array_index = partition_id_index + partition_id_size_length
     record_batch_size_length = varint_encoding_size(client_request, record_batch_array_index + 1)
-    logger.info(f"record_batch_size_length: {record_batch_size_length}")
+    #logger.info(f"record_batch_size_length: {record_batch_size_length}")
     record_batch_size = int.from_bytes(
         client_request[record_batch_array_index: record_batch_array_index + record_batch_size_length],
         byteorder='big')
-    logger.info(f"record_batch_size: {record_batch_size}")
+    #logger.info(f"record_batch_size: {record_batch_size}")
     record_batch_index = record_batch_array_index + record_batch_size_length
     record_batch = client_request[record_batch_index: record_batch_index + record_batch_size]
-    logger.info(f"record_batch: {len(record_batch)}|{record_batch.hex()}")
+    #logger.info(f"record_batch: {len(record_batch)}|{record_batch.hex()}")
 
     valid_topic_and_partition = False
 
@@ -48,7 +82,7 @@ def produce_partition_response(client_request: bytes,
         for partition in topics[topic_name]["partitions"]:
             if partition_idx == partition["partition_index"]:
                 valid_topic_and_partition = True
-                logger.info(f"Valid topic and partition. Topic: {topic_name}, Partition: {partition_idx}")
+                #logger.info(f"Valid topic and partition. Topic: {topic_name}, Partition: {partition_idx}")
                 break
 
     if valid_topic_and_partition:
@@ -62,7 +96,7 @@ def produce_partition_response(client_request: bytes,
 
         with open(record_batch_log_file, 'wb') as log_file:
             bytes_written = log_file.write(record_batch)
-            logger.info(f"Wrote {bytes_written} to record batch log file: {record_batch_log_file}")
+            #logger.info(f"Wrote {bytes_written} to record batch log file: {record_batch_log_file}")
 
     else:
         error_code = int(3).to_bytes(2, byteorder='big')
@@ -438,7 +472,7 @@ def handle_fetch_requests(client_request: bytes) -> bytes:
 
 
 def handle_produce_requests(client_request: bytes) -> bytes:
-    logger.info(f"client_request: {client_request.hex()}")
+    #logger.info(f"client_request: {client_request.hex()}")
     if Path(CLUSTER_METADATA_FILE).is_file():
         logger.info("Loading Cluster metadata file")
         with open(CLUSTER_METADATA_FILE, 'rb') as f:
@@ -469,35 +503,23 @@ def handle_produce_requests(client_request: bytes) -> bytes:
                         + field_sizes["transactional_id"] + field_sizes["required_acks"] + field_sizes["timeout"]
 
     topics_array_length = client_request[topics_array_index: topics_array_index + 1]
-    topic_name_size = int.from_bytes(client_request[topics_array_index + 1: topics_array_index + 2], byteorder='big')
-    topic_name = client_request[topics_array_index + 2: (topics_array_index + topic_name_size + 1)].decode("utf-8")
+    topics_resp_array = topics_array_length
+    topics_array_size = int.from_bytes(topics_array_length, byteorder='big') - 1
+    topic_index = topics_array_index + 1
 
-    partition_array_index = topics_array_index + topic_name_size + 1
-    partitions_array_length = client_request[partition_array_index: partition_array_index + 1]
-    partitions_resp_array = partitions_array_length
-    partitions_array_size = int.from_bytes(partitions_array_length, byteorder='big') - 1
-    partition_id_index = partition_array_index + 1
+    for _ in range(topics_array_size):
+        #logger.info(f"topic_index: {topic_index}|{topics_array_size}")
+        topics_response, topics_next_index = produce_topic_response(client_request, topic_index, topics)
+        #logger.info(f"topics resp: {len(topics_response)}|{topics_response.hex()}")
+        topics_resp_array += topics_response
+        topic_index = topics_next_index
 
-    for _ in range(partitions_array_size):
-        logger.info(f"partition_array_index: {partition_id_index} | {partitions_array_size}")
-        partition_resp, next_partition_id_index = produce_partition_response(client_request, partition_id_index, topic_name, topics)
-        logger.info(f"partition_resp: {partition_resp.hex()}")
-        partitions_resp_array += partition_resp
-        partition_id_index = next_partition_id_index
-
-    logger.info(f"partitions_resp_array: {partitions_resp_array.hex()}")
 
     tag_buffer = int(0).to_bytes(1, byteorder='big')
     throttle_time = int(0).to_bytes(4, byteorder='big')
 
-
-    topics_data = topics_array_length + topic_name_size.to_bytes(1, byteorder='big') \
-                  + topic_name.encode('utf-8')
-
-    topics_array = topics_data + partitions_resp_array + tag_buffer
-
-    resp_body = tag_buffer + topics_array + throttle_time + tag_buffer
-    logger.info(f"produce resp: {len(resp_body)}|{resp_body.hex()}")
+    resp_body = tag_buffer + topics_resp_array + throttle_time + tag_buffer
+    #logger.info(f"produce resp: {len(resp_body)}|{resp_body.hex()}")
     return resp_body
 
 
