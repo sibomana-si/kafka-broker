@@ -3,7 +3,6 @@ import logging
 import uuid
 from asyncio import StreamReader, StreamWriter, Server
 from pathlib import Path
-from sys import byteorder
 from typing import Any
 
 
@@ -14,15 +13,28 @@ PRODUCE_KEY = 0
 FETCH_KEY = 1
 API_VERSIONS_KEY = 18
 DESCRIBE_TOPIC_PARTITIONS_KEY = 75
-CLUSTER_METADATA_FILE = "/tmp/kraft-combined-logs/__cluster_metadata-0/00000000000000000000.log"
 LOG_FILES_DIR = "/tmp/kraft-combined-logs"
 LOG_FILE_NAME = "00000000000000000000.log"
 
 
-def produce_topic_response(client_request: bytes,
+async def produce_topic_response(client_request: bytes,
                            topic_index: int,
                            topics: dict,
                            ) -> tuple[bytes, int]:
+    """
+    Generate a response for a specific topic based on the given client request, topic index, and topic metadata.
+
+    This function processes client request data to extract topic and partition
+    information, generates responses for individual partitions using a corresponding
+    helper function, and constructs a full response for the specified topic.
+
+    :param client_request: The raw client request data represented as bytes.
+    :param topic_index: The index in the client request where the topic information begins.
+    :param topics: A dictionary containing metadata about available topics and partitions.
+
+    :return: A tuple consisting of the topic response as bytes and the next index
+             in the client request to process after handling the topic.
+    """
 
     tag_buffer = int(0).to_bytes(1, byteorder='big')
     topic_name_size = int.from_bytes(client_request[topic_index: topic_index + 1], byteorder='big')
@@ -35,45 +47,51 @@ def produce_topic_response(client_request: bytes,
     partition_id_index = partition_array_index + 1
 
     for _ in range(partitions_array_size):
-        #logger.info(f"partition_array_index: {partition_id_index} | {partitions_array_size}")
-        partition_resp, next_partition_id_index = produce_partition_response(client_request, partition_id_index, topic_name,
+        partition_resp, next_partition_id_index = await produce_partition_response(client_request, partition_id_index, topic_name,
                                                                          topics)
-        #logger.info(f"partition_resp: {partition_resp.hex()}")
         partitions_resp_array += partition_resp
         partition_id_index = next_partition_id_index
 
-    #logger.info(f"partitions_resp_array: {partitions_resp_array.hex()}")
-
     topics_resp = topic_name_size.to_bytes(1, byteorder='big') + topic_name.encode('utf-8') \
                   + partitions_resp_array + tag_buffer
-    #logger.info(f"topics resp: {len(topics_resp)}|{topics_resp.hex()}")
 
     topics_next_index = partition_id_index + 1
 
     return topics_resp, topics_next_index
 
 
-def produce_partition_response(client_request: bytes,
+async def produce_partition_response(client_request: bytes,
                                partition_id_index: int,
                                topic_name: str,
                                topics: dict
                                ) -> tuple[bytes, int]:
+    """
+    Processes a partition-level response for a Kafka Produce request.
+
+    This function extracts information related to a specific topic partition from the client
+    request, validates it against the list of server-side topic partitions, and constructs
+    a response reflecting the result. When the partition and topic validation is successful,
+    it logs the received record batch into an appropriate log file.
+
+    :param client_request: Bytes containing the client request payload.
+    :param partition_id_index: Index in the client request where the partition ID starts.
+    :param topic_name: Name of the topic to which the partition belongs.
+    :param topics: Dictionary containing topic metadata, including partitions.
+    :return: A tuple containing the serialized partition response and the next byte index to
+             process in the client request payload.
+    """
 
     tag_buffer = int(0).to_bytes(1, byteorder='big')
     partition_id_size_length = 4
     partition_index = client_request[partition_id_index: partition_id_index + partition_id_size_length]
-    #logger.info(f"partition_index: {int.from_bytes(partition_index, byteorder='big')}")
 
     record_batch_array_index = partition_id_index + partition_id_size_length
     record_batch_size_length = varint_encoding_size(client_request, record_batch_array_index + 1)
-    #logger.info(f"record_batch_size_length: {record_batch_size_length}")
     record_batch_size = int.from_bytes(
         client_request[record_batch_array_index: record_batch_array_index + record_batch_size_length],
         byteorder='big')
-    #logger.info(f"record_batch_size: {record_batch_size}")
     record_batch_index = record_batch_array_index + record_batch_size_length
     record_batch = client_request[record_batch_index: record_batch_index + record_batch_size]
-    #logger.info(f"record_batch: {len(record_batch)}|{record_batch.hex()}")
 
     valid_topic_and_partition = False
 
@@ -82,7 +100,6 @@ def produce_partition_response(client_request: bytes,
         for partition in topics[topic_name]["partitions"]:
             if partition_idx == partition["partition_index"]:
                 valid_topic_and_partition = True
-                #logger.info(f"Valid topic and partition. Topic: {topic_name}, Partition: {partition_idx}")
                 break
 
     if valid_topic_and_partition:
@@ -95,8 +112,7 @@ def produce_partition_response(client_request: bytes,
                                 + "/" + LOG_FILE_NAME
 
         with open(record_batch_log_file, 'wb') as log_file:
-            bytes_written = log_file.write(record_batch)
-            #logger.info(f"Wrote {bytes_written} to record batch log file: {record_batch_log_file}")
+            log_file.write(record_batch)
 
     else:
         error_code = int(3).to_bytes(2, byteorder='big')
@@ -114,16 +130,29 @@ def produce_partition_response(client_request: bytes,
     return partition_resp, next_index
 
 
-def encode_kafka_unsigned_varint(value: int) -> bytes:
-    """Encode an integer as Kafka UVARINT (unsigned LEB128)."""
+def encode_unsigned_varint(value: int) -> bytes:
+    """
+    Encode an integer as Kafka UVARINT (unsigned LEB128).
+
+    This function takes a non-negative integer and encodes it as an unsigned
+    variable-length integer using the LEB128 format. The encoding proceeds by
+    writing 7-bit chunks of the integer, with the most significant bit of each
+    byte used as a continuation flag. The most significant bit is set to 1 for
+    all chunks except the final one, which indicates the end of the encoding.
+
+    :param value: The non-negative integer to encode.
+    :return: Encoded bytes representing the integer in Kafka UVARINT format.
+    :raises ValueError: If the input value is negative.
+    """
+
     if value < 0:
         raise ValueError("UVARINT cannot encode negative values")
     encoded = bytearray()
     while True:
-        to_write = value & 0x7F
+        to_write = value & 127
         value >>= 7
         if value:
-            encoded.append(to_write | 0x80)
+            encoded.append(to_write | 128)
         else:
             encoded.append(to_write)
             break
@@ -131,6 +160,20 @@ def encode_kafka_unsigned_varint(value: int) -> bytes:
 
 
 def varint_encoding_size(request: bytes, index: int) -> int:
+    """
+    Calculates the size of a varint-encoded integer in bytes from a given array of bytes.
+
+    The function iterates through each byte of the provided request starting at the
+    given index until it encounters a byte indicating the end of the varint-encoded
+    integer. The size of the varint-encoded integer is then returned in bytes.
+
+    :param request: The byte array that holds the varint-encoded integer. The data
+        must be properly formatted for varint encoding.
+    :param index: The starting index within the byte array from where to begin
+        decoding.
+    :return: The total size of the varint-encoded integer in bytes.
+    """
+
     num_bytes = 1
     while int.from_bytes(request[index: index + 1], byteorder='big') != 0:
         num_bytes += 1
@@ -139,6 +182,26 @@ def varint_encoding_size(request: bytes, index: int) -> int:
 
 
 def get_response_topic_data(request_topic: str, topics: dict[str, dict[str, Any]]) -> bytes:
+    """
+    Generate response topic data containing information about the requested topic.
+
+    This function constructs a byte-encoded response object that encapsulates
+    metadata and information about a requested topic. It accesses the topic
+    details from the provided dictionary of topics and encodes the necessary
+    data such as topic ID, error codes, partition information, and various
+    properties. If the requested topic does not exist, it returns a default
+    response indicating an error condition.
+
+    :param request_topic: The name of the topic for which metadata is being
+                          requested.
+    :param topics: A dictionary mapping topic names to their respective metadata.
+                   The metadata includes details such as topic UUID, error codes,
+                   and information about partitions. Each topic metadata should
+                   follow a specific schema with required keys.
+    :return: Byte-encoded response containing topic metadata information or a
+             default error response if the topic does not exist.
+    """
+
     tag_buffer = int(0).to_bytes(1, byteorder='big')
     is_internal = int(0).to_bytes(1, byteorder='big')
     topic_authorized_operations = int(0).to_bytes(4, byteorder='big')
@@ -189,6 +252,22 @@ def extract_record_batch(cluster_metadata: bytes, record_batch_index: int) -> by
 
 
 def process_record_batch(record_batch: bytes) -> list:
+    """
+    Processes a binary record batch and extracts individual records.
+
+    This function takes a binary record batch, parses the number of records, and then
+    iterates through the batch to extract individual records. The records are determined
+    based on their size and structure, and the extracted records are added to a list,
+    which is returned.
+
+    :param record_batch: The binary batch of records to process.
+        Must contain metadata in the first 61 bytes, including
+        the number of records (bytes 57 to 61), followed by the
+        actual record data.
+    :return: A list of individual records extracted from the
+        provided binary record batch.
+    """
+
     record_list: list = []
     num_records = int.from_bytes(record_batch[57:61], byteorder='big')
     record_array = record_batch[61:]
@@ -206,6 +285,18 @@ def process_record_batch(record_batch: bytes) -> list:
 
 
 def process_record(record: bytes) -> dict[str, Any]:
+    """
+    Processes a binary record and returns a dictionary representation of its content. The
+    function interprets the binary input based on its type and extracts relevant
+    information for topic or partition records. Unknown record types are also
+    handled and labeled appropriately.
+
+    :param record: A binary sequence representing encoded topic or partition data.
+    :return: A dictionary containing the parsed record's type and additional
+        attributes depending on its content. If the record is unknown, the dictionary
+        will only contain the "type" key with the value "unknown".
+    """
+
     processed_record: dict[str, Any] = dict()
     record_type = int.from_bytes(record[0:1], byteorder='big')
 
@@ -246,23 +337,27 @@ def process_record(record: bytes) -> dict[str, Any]:
 
 
 def parse_cluster_metadata(cluster_metadata: bytes) -> dict:
+    """
+    Parses cluster metadata from a byte stream and extracts information about topics and their
+    associated partitions. The extracted metadata is organized in a dictionary structure.
+
+    :param cluster_metadata: A byte stream containing the raw metadata of the cluster.
+    :return: A dictionary where the keys are topic names and the values are dictionaries
+        containing topic metadata, including a list of associated partition records.
+    """
+
     topics: dict[str, dict[str, Any]] = dict()
     record_batch_index = 0
     cluster_metadata_len = len(cluster_metadata)
 
     while record_batch_index < cluster_metadata_len:
         record_batch = extract_record_batch(cluster_metadata, record_batch_index)
-        #logger.info(f"record_batch: {record_batch_index}|{len(record_batch)}|{record_batch.hex()}")
         record_list = process_record_batch(record_batch)
-        #logger.info(f"record_list size: {len(record_list)}")
         for record in record_list:
-            #logger.info(f"record: {len(record)}|{record.hex()}")
             processed_record = process_record(record)
             if processed_record["type"] == "topic":
-                #logger.info(f"topic: {processed_record}")
                 topics[processed_record["topic_name"]] = processed_record
             elif processed_record["type"] == "partition":
-                #logger.info(f"partition: {processed_record}")
                 for topic in topics:
                     if processed_record["topic_uuid"] == topics[topic]["topic_uuid"]:
                         topics[topic]["partitions"].append(processed_record)
@@ -275,7 +370,21 @@ def parse_cluster_metadata(cluster_metadata: bytes) -> dict:
     return topics
 
 
-def handle_api_version_requests(client_request: bytes) -> bytes:
+async def handle_api_version_requests(client_request: bytes, topics: dict[str, dict]) -> bytes:
+    """
+    Handles API version requests by generating the appropriate response based on the
+    API version specified in the client's request.
+
+    The function decodes the API version from the provided `client_request`, verifies whether
+    it is supported, and constructs a response containing metadata for supported API keys
+    and their associated minimum/maximum versions. If the API version is not supported,
+    an error code is returned in the response.
+
+    :param client_request: The byte string containing the client's request message.
+    :param topics: A dictionary containing topic metadata.
+    :return: A byte string containing the response for the API version request.
+    """
+
     request_api_version = int.from_bytes(client_request[6:8], byteorder='big')
 
     if request_api_version in (0, 1, 2, 3, 4):
@@ -315,18 +424,19 @@ def handle_api_version_requests(client_request: bytes) -> bytes:
     return resp_body
 
 
-def handle_describe_topic_partition_requests(client_request: bytes) -> bytes:
-    #logger.info(f"client request: {client_request.hex()}")
-    if Path(CLUSTER_METADATA_FILE).is_file():
-        logger.info("Loading Cluster metadata file")
-        with open(CLUSTER_METADATA_FILE, 'rb') as f:
-            cluster_metadata = f.read()
-            logger.info(f"Cluster metadata: {len(cluster_metadata)}|{cluster_metadata.hex()}")
-            topics = parse_cluster_metadata(cluster_metadata)
-            logger.info(f"Cluster metadata file loaded successfully. Topics: {topics}")
-    else:
-        logger.info("Cluster metadata file not found.")
+async def handle_describe_topic_partition_requests(client_request: bytes, topics: dict[str, dict]) -> bytes:
+    """
+    Handles describe topic partition requests from a Kafka client. Parses the incoming request, extracts the requested
+    topics, prepares the appropriate response data, and constructs a response byte stream.
 
+    :param client_request: A byte stream representing the client request, containing information such as API key,
+        API version, client ID, and the list of topics being queried.
+    :param topics: A dictionary mapping topic names to their corresponding metadata and partition details. The keys
+        are strings representing topic names, and the values are dictionaries containing partition-level details or
+        topic-specific information.
+    :return: A byte stream representing the server response to the client's describe topic partition request, prepared
+        with appropriate encoding and response format.
+    """
 
     client_id_length = int.from_bytes(client_request[12:14], byteorder='big')
 
@@ -363,29 +473,27 @@ def handle_describe_topic_partition_requests(client_request: bytes) -> bytes:
     resp_topics_array = topics_array_length
 
     for request_topic in sorted(request_topics):
-        #logger.info(f"request_topic: {request_topic}")
         resp_topic_data = get_response_topic_data(request_topic, topics)
-        #logger.info(f"resp_topic_data: {len(resp_topic_data)}|{resp_topic_data.hex()}")
         resp_topics_array += resp_topic_data
 
 
     resp_body = tag_buffer + throttle_time + resp_topics_array + next_cursor + tag_buffer
 
-    #logger.info(f"resp_body: {len(resp_body)}|{resp_body.hex()}")
     return resp_body
 
 
-def handle_fetch_requests(client_request: bytes) -> bytes:
-    #logger.info(f"client request: {len(client_request)}|{client_request.hex()}")
-    if Path(CLUSTER_METADATA_FILE).is_file():
-        logger.info("Loading Cluster metadata file")
-        with open(CLUSTER_METADATA_FILE, 'rb') as f:
-            cluster_metadata = f.read()
-            logger.info(f"Cluster metadata: {len(cluster_metadata)}|{cluster_metadata.hex()}")
-            topics = parse_cluster_metadata(cluster_metadata)
-            logger.info(f"Cluster metadata file loaded successfully. Topics: {topics}")
-    else:
-        logger.info("Cluster metadata file not found.")
+async def handle_fetch_requests(client_request: bytes, topics: dict[str, dict]) -> bytes:
+    """
+    Handles Kafka fetch requests by processing a client request for specific topics and returning
+    a formatted response with the requested data or error information.
+
+    :param client_request: The byte-encoded client request containing request metadata, topic
+        information, and other configurations as used in Kafka fetch protocol.
+    :param topics: A dictionary where keys represent topic names and values are nested dictionaries
+        including metadata (e.g., "topic_uuid") for each topic.
+    :return: A byte-encoded Kafka fetch response containing the requested records, error codes,
+        and other necessary metadata, conforming to the Kafka protocol.
+    """
 
     client_id_length = int.from_bytes(client_request[12:14], byteorder='big')
 
@@ -424,7 +532,6 @@ def handle_fetch_requests(client_request: bytes) -> bytes:
 
     for topic in topics:
         if topics[topic]["topic_uuid"] == uuid.UUID(bytes=topic_uuid):
-            #logger.info(f"request topic: {topic}")
             partition_error_code = int(0).to_bytes(2, byteorder='big')
             record_batch_log_dir = LOG_FILES_DIR + "/" + topic \
                                    + "-" + str(int.from_bytes(partition_index, byteorder='big')) \
@@ -432,13 +539,11 @@ def handle_fetch_requests(client_request: bytes) -> bytes:
             record_batch_log = record_batch_log_dir + LOG_FILE_NAME
             partition_records_array = b""
             if Path(record_batch_log).is_file() and Path(record_batch_log).stat().st_size > 0:
-                #logger.info(f"record batch log file found: {record_batch_log}")
                 with open(record_batch_log, 'rb') as log_file:
                     partition_records_array = log_file.read()
 
-            partition_records_array = encode_kafka_unsigned_varint(len(partition_records_array) + 1) \
+            partition_records_array = encode_unsigned_varint(len(partition_records_array) + 1) \
                                       + partition_records_array
-            #logger.info(f"partition_records_array: {len(partition_records_array)}|{partition_records_array.hex()}")
             break
     else:
         partition_error_code = int(100).to_bytes(2, byteorder='big')
@@ -459,29 +564,26 @@ def handle_fetch_requests(client_request: bytes) -> bytes:
                        + partition_preferred_read_replica + partition_records_array \
                        + partition_diverging_epoch_array + partition_current_leader_array \
                        + partition_snapshot_id_array + tag_buffer
-    #logger.info(f"partitions_array: {len(partitions_array)}|{partitions_array.hex()}")
     topics_array = topics_array_length + topic_uuid + partitions_array + tag_buffer
-    #logger.info(f"topics_array: {len(topics_array)}|{topics_array.hex()}")
     node_endpoints_array = int(1).to_bytes(1, byteorder='big')
 
     resp_body = tag_buffer + throttle_time + error_code + session_id \
                 + topics_array  + node_endpoints_array + tag_buffer
 
-    #logger.info(f"fetch resp: {len(resp_body)}|{resp_body.hex()}")
     return resp_body
 
 
-def handle_produce_requests(client_request: bytes) -> bytes:
-    #logger.info(f"client_request: {client_request.hex()}")
-    if Path(CLUSTER_METADATA_FILE).is_file():
-        logger.info("Loading Cluster metadata file")
-        with open(CLUSTER_METADATA_FILE, 'rb') as f:
-            cluster_metadata = f.read()
-            logger.info(f"Cluster metadata: {len(cluster_metadata)}|{cluster_metadata.hex()}")
-            topics = parse_cluster_metadata(cluster_metadata)
-            logger.info(f"Cluster metadata file loaded successfully. Topics: {topics}")
-    else:
-        logger.info("Cluster metadata file not found.")
+async def handle_produce_requests(client_request: bytes, topics: dict[str, dict]) -> bytes:
+    """
+    Processes a produce request from a Kafka client. This function parses the client request,
+    extracts necessary information about topics, and generates a response with relevant
+    topic data. It optionally handles cluster metadata if available in the cluster metadata
+    file. Finally, the constructed response is returned.
+
+    :param client_request: The byte-encoded request sent by the Kafka client.
+    :param topics: A dictionary containing topic information.
+    :return: A byte-encoded response containing processed topic information.
+    """
 
     client_id_length = int.from_bytes(client_request[12:14], byteorder='big')
 
@@ -508,9 +610,7 @@ def handle_produce_requests(client_request: bytes) -> bytes:
     topic_index = topics_array_index + 1
 
     for _ in range(topics_array_size):
-        #logger.info(f"topic_index: {topic_index}|{topics_array_size}")
-        topics_response, topics_next_index = produce_topic_response(client_request, topic_index, topics)
-        #logger.info(f"topics resp: {len(topics_response)}|{topics_response.hex()}")
+        topics_response, topics_next_index = await produce_topic_response(client_request, topic_index, topics)
         topics_resp_array += topics_response
         topic_index = topics_next_index
 
@@ -519,11 +619,21 @@ def handle_produce_requests(client_request: bytes) -> bytes:
     throttle_time = int(0).to_bytes(4, byteorder='big')
 
     resp_body = tag_buffer + topics_resp_array + throttle_time + tag_buffer
-    #logger.info(f"produce resp: {len(resp_body)}|{resp_body.hex()}")
     return resp_body
 
 
 async def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
+    """
+    Handles communication with a connected client in an asynchronous manner. The client_handler function
+    reads client requests, identifies the appropriate API handler based on a predefined set of API keys,
+    and sends responses back to the client. It ensures proper error handling, logging, and closure of
+    the client connection upon termination.
+
+    :param reader: The asyncio StreamReader instance used to receive data from the client.
+    :param writer: The asyncio StreamWriter instance used to send data to the client.
+    :return: None
+    """
+
     client_address: str = writer.get_extra_info('peername')
     logger.info(f"Connection accepted from {client_address}")
 
@@ -542,7 +652,19 @@ async def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
             resp_body = b''
 
             if request_api_key in api_handlers:
-                resp_body = api_handlers[request_api_key](client_request)
+                topics = {}
+                cluster_metadata_file = LOG_FILES_DIR + "/__cluster_metadata-0/" + LOG_FILE_NAME
+                if Path(cluster_metadata_file).is_file():
+                    logger.info("Loading Cluster metadata file")
+                    with open(cluster_metadata_file, 'rb') as f:
+                        cluster_metadata = f.read()
+                        logger.info(f"Cluster metadata: {len(cluster_metadata)}|{cluster_metadata.hex()}")
+                        topics = parse_cluster_metadata(cluster_metadata)
+                        logger.info(f"Cluster metadata file loaded successfully. Topics: {topics}")
+                else:
+                    logger.info("Cluster metadata file not found.")
+
+                resp_body = await api_handlers[request_api_key](client_request, topics)
             else:
                 logger.error(f"Unsupported API: {request_api_key}|{client_request.hex()}")
 
