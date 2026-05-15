@@ -29,6 +29,7 @@ async def client_handler(
         writer: StreamWriter,
         handler: RequestHandler,
         topics: dict[str, dict[str, Any]],
+        topics_by_uuid: dict[bytes, dict[str, Any]],
         shutdown_event: asyncio.Event
 ) -> None:
     """
@@ -41,19 +42,13 @@ async def client_handler(
     :param writer: The output stream to send data back to the client.
     :param handler: An instance of the `RequestHandler` class responsible for handling specific API requests.
     :param topics: A dictionary containing the cluster metadata.
+    :param topics_by_uuid: A dictionary containing the cluster metadata, keyed by UUID bytes.
     :param shutdown_event: An event triggered when the server is shutting down.
     :return: None
     """
 
     client_address: str = writer.get_extra_info("peername")
     logger.info(f"Connection accepted from {client_address}")
-
-    api_handlers = {
-        API_VERSIONS_KEY: handler.handle_api_version_requests,
-        DESCRIBE_TOPIC_PARTITIONS_KEY: handler.handle_describe_topic_partition_requests,
-        FETCH_KEY: handler.handle_fetch_requests,
-        PRODUCE_KEY: handler.handle_produce_requests
-    }
 
     try:
         while not shutdown_event.is_set():
@@ -91,8 +86,14 @@ async def client_handler(
             correlation_id = client_request[8:12]
             resp_body = b""
 
-            if request_api_key in api_handlers:
-                resp_body = await api_handlers[request_api_key](client_request, topics)
+            if request_api_key == API_VERSIONS_KEY:
+                resp_body = await handler.handle_api_version_requests(client_request)
+            elif request_api_key == DESCRIBE_TOPIC_PARTITIONS_KEY:
+                resp_body = await handler.handle_describe_topic_partition_requests(client_request, topics)
+            elif request_api_key == FETCH_KEY:
+                resp_body = await handler.handle_fetch_requests(client_request, topics_by_uuid)
+            elif request_api_key == PRODUCE_KEY:
+                resp_body = await handler.handle_produce_requests(client_request, topics)
             else:
                 logger.error(f"Unsupported API: {request_api_key}|{client_request.hex()}")
 
@@ -149,8 +150,12 @@ async def main():
     host_port = 9092
     
     storage = Storage(LOG_FILES_DIR, LOG_FILE_NAME)
-    topics = await storage.load_metadata()
     handler = RequestHandler(storage)
+
+    topics = await storage.load_metadata()
+
+    # lookup index for Fetch requests
+    topics_by_uuid = {topic_data["topic_uuid"].bytes: topic_data for topic_data in topics.values()}
 
     connection_semaphore = asyncio.Semaphore(MAX_CONCURRENT_CONNECTIONS)
     shutdown_event = asyncio.Event()
@@ -173,7 +178,7 @@ async def main():
         active_connections.add(current_task)
 
         try:
-            await client_handler(reader, writer, handler, topics, shutdown_event)
+            await client_handler(reader, writer, handler, topics, topics_by_uuid, shutdown_event)
         finally:
             active_connections.remove(current_task)
             connection_semaphore.release()

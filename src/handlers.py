@@ -1,4 +1,3 @@
-import uuid
 from typing import Any
 from utils import encode_unsigned_varint, varint_encoding_size
 from storage import Storage
@@ -8,12 +7,11 @@ class RequestHandler:
     def __init__(self, storage: Storage):
         self.storage = storage
 
-    async def handle_api_version_requests(self, client_request: bytes, topics: dict[str, dict]) -> bytes:
+    async def handle_api_version_requests(self, client_request: bytes) -> bytes:
         """
         Handles API version requests and generates the appropriate response.
 
         :param client_request: A byte representation of the client's API version request.
-        :param topics: A dictionary where keys are topic names and values are dictionaries describing partition details.
         :return: A byte representation of the API version response, which includes error codes and
                 supported API key information.
         """
@@ -137,7 +135,7 @@ class RequestHandler:
 
         return resp_body
 
-    async def handle_fetch_requests(self, client_request: bytes, topics: dict[str, dict]) -> bytes:
+    async def handle_fetch_requests(self, client_request: bytes,  topics_by_uuid: dict[bytes, dict[str, Any]]) -> bytes:
         """
         Handles incoming fetch requests and generates the corresponding response.
 
@@ -149,8 +147,7 @@ class RequestHandler:
         response.
 
         :param client_request: The binary data representing the client fetch request.
-        :param topics: A dictionary where keys are topic names and values are
-                       dictionaries that include metadata such as topic UUID.
+        :param topics_by_uuid: A dictionary for O(1) lookup of topics by their raw UUID bytes.
         :return: A binary-encoded response that contains the requested data or an
                  error message if the request could not be fulfilled.
         """
@@ -198,14 +195,16 @@ class RequestHandler:
         throttle_time = int(0).to_bytes(4, byteorder="big")
         error_code = int(0).to_bytes(2, byteorder="big")
 
-        for topic in topics:
-            if topics[topic]["topic_uuid"] == uuid.UUID(bytes=topic_uuid):
-                partition_error_code = int(0).to_bytes(2, byteorder="big")
-                partition_idx = int.from_bytes(partition_index, byteorder="big")
-                partition_records_array = await self.storage.read_partition_log(topic, partition_idx)
-                partition_records_array = encode_unsigned_varint(len(partition_records_array) + 1) \
-                                          + partition_records_array
-                break
+        if topic_uuid in topics_by_uuid:
+            topic_data = topics_by_uuid[topic_uuid]
+            topic_name = topic_data["topic_name"]
+
+            partition_error_code = int(0).to_bytes(2, byteorder="big")
+            partition_idx = int.from_bytes(partition_index, byteorder="big")
+            partition_records_array = await self.storage.read_partition_log(topic_name, partition_idx)
+
+            partition_records_array = encode_unsigned_varint(len(partition_records_array) + 1) + partition_records_array
+
         else:
             partition_error_code = int(100).to_bytes(2, byteorder="big")
             partition_records_array = int(0).to_bytes(1, byteorder="big")
@@ -345,10 +344,8 @@ class RequestHandler:
 
         if topic_name in topics:
             partition_idx = int.from_bytes(partition_index, byteorder="big")
-            for partition in topics[topic_name]["partitions"]:
-                if partition_idx == partition["partition_index"]:
-                    valid_topic_and_partition = True
-                    break
+            if partition_idx in topics[topic_name]["partitions"]:
+                valid_topic_and_partition = True
 
         if valid_topic_and_partition:
             error_code = int(0).to_bytes(2, byteorder="big")
@@ -356,7 +353,6 @@ class RequestHandler:
             log_start_offset = int(0).to_bytes(8, byteorder="big")
             partition_idx = int.from_bytes(partition_index, byteorder="big")
             await self.storage.write_partition_log(topic_name, partition_idx, record_batch)
-
         else:
             error_code = int(3).to_bytes(2, byteorder="big")
             base_offset = int(-1).to_bytes(8, byteorder="big", signed=True)
@@ -472,7 +468,7 @@ class RequestHandler:
 
             partition_array_size = (len(resp_topic_details["partitions"]) + 1).to_bytes(1, byteorder="big")
 
-            for partition in resp_topic_details["partitions"]:
+            for partition in resp_topic_details["partitions"].values():
                 partition_index = partition["partition_index"].to_bytes(4, byteorder="big")
                 leader_id = partition["leader_id"].to_bytes(4, byteorder="big")
                 leader_epoch = partition["leader_epoch"].to_bytes(4, byteorder="big")

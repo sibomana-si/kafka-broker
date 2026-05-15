@@ -104,57 +104,6 @@ class Storage:
                 await self._append_file(log_file, bytes(data))
             self.buffers.clear()
 
-    async def _read_file(self, file_path: str) -> bytes:
-        """
-        Reads the content of a file asynchronously and returns its binary content.
-
-        This method reads the file in binary mode and executes the read operation
-        in a separate thread to avoid blocking the main thread.
-
-        :param file_path: The path of the file to be read.
-        :return: The binary content of the file.
-        """
-
-        def _read():
-            with open(file_path, "rb") as f:
-                return f.read()
-        return await asyncio.to_thread(_read)
-
-    async def _write_file(self, file_path: str, data: bytes) -> None:
-        """
-        Writes binary data asynchronously to a specified file.
-
-        This method uses a separate thread to handle file-writing operations,
-        ensuring that the main event loop remains non-blocking.
-
-        :param file_path: The path to the file where data will be written.
-        :param data: The binary data to be written to the file.
-        :return: None
-        """
-
-        def _write():
-            with open(file_path, "wb") as f:
-                f.write(data)
-        await asyncio.to_thread(_write)
-
-    async def _append_file(self, file_path: str, data: bytes) -> None:
-        """
-        Asynchronously appends binary data to a file.
-
-        This function opens the specified file in binary append mode ('ab') and writes
-        the provided binary data to the file. It performs the file I/O operation in a
-        separate thread, ensuring non-blocking behavior in async applications.
-
-        :param file_path: The path of the file to which the data will be appended.
-        :param data: The binary data to append to the file.
-        :return: None
-        """
-
-        def _append():
-            with open(file_path, "ab") as f:
-                f.write(data)
-        await asyncio.to_thread(_append)
-
     def _parse_cluster_metadata(self, cluster_metadata: bytes) -> dict:
         """
         Parses cluster metadata from a byte sequence and constructs a dictionary containing
@@ -175,16 +124,71 @@ class Storage:
             for record in record_list:
                 processed_record = self._process_record(record)
                 if processed_record["type"] == "topic":
+                    processed_record["partitions"] = {}
                     topics[processed_record["topic_name"]] = processed_record
                 elif processed_record["type"] == "partition":
                     for topic in topics:
                         if processed_record["topic_uuid"] == topics[topic]["topic_uuid"]:
-                            topics[topic]["partitions"].append(processed_record)
+                            topics[topic]["partitions"][processed_record["partition_index"]] = processed_record
                             break
                     else:
                         raise Exception(f"partition with no associated topic!|{processed_record}")
             record_batch_index += len(record_batch)
         return topics
+
+    @staticmethod
+    async def _read_file(file_path: str) -> bytes:
+        """
+        Reads the content of a file asynchronously and returns its binary content.
+
+        This method reads the file in binary mode and executes the read operation
+        in a separate thread to avoid blocking the main thread.
+
+        :param file_path: The path of the file to be read.
+        :return: The binary content of the file.
+        """
+
+        def _read():
+            with open(file_path, "rb") as f:
+                return f.read()
+        return await asyncio.to_thread(_read)
+
+    @staticmethod
+    async def _write_file(file_path: str, data: bytes) -> None:
+        """
+        Writes binary data asynchronously to a specified file.
+
+        This method uses a separate thread to handle file-writing operations,
+        ensuring that the main event loop remains non-blocking.
+
+        :param file_path: The path to the file where data will be written.
+        :param data: The binary data to be written to the file.
+        :return: None
+        """
+
+        def _write():
+            with open(file_path, "wb") as f:
+                f.write(data)
+        await asyncio.to_thread(_write)
+
+    @staticmethod
+    async def _append_file(file_path: str, data: bytes) -> None:
+        """
+        Asynchronously appends binary data to a file.
+
+        This function opens the specified file in binary append mode ('ab') and writes
+        the provided binary data to the file. It performs the file I/O operation in a
+        separate thread, ensuring non-blocking behavior in async applications.
+
+        :param file_path: The path of the file to which the data will be appended.
+        :param data: The binary data to append to the file.
+        :return: None
+        """
+
+        def _append():
+            with open(file_path, "ab") as f:
+                f.write(data)
+        await asyncio.to_thread(_append)
 
     @staticmethod
     def _extract_record_batch(cluster_metadata: bytes, record_batch_index: int) -> bytes:
@@ -259,7 +263,6 @@ class Storage:
 
         if record_type == 2:
             processed_record["type"] = "topic"
-            processed_record["partitions"] = []
 
             topic_name_length = int.from_bytes(record[2:3], byteorder="big") - 1
             topic_name = record[3 : 3 + topic_name_length].decode("utf-8")
