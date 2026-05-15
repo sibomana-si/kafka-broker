@@ -17,6 +17,7 @@ LOG_FILE_NAME = "00000000000000000000.log"
 CLIENT_READ_TIMEOUT = 5
 CLIENT_WRITE_TIMEOUT = 5
 MAX_WRITE_RETRIES = 3
+MAX_CONCURRENT_CONNECTIONS = 100
 
 
 async def client_handler(reader: StreamReader, writer: StreamWriter, handler: RequestHandler, storage: Storage) -> None:
@@ -97,8 +98,14 @@ async def main():
     storage = Storage(LOG_FILES_DIR, LOG_FILE_NAME)
     handler = RequestHandler(storage)
 
+    connection_semaphore = asyncio.Semaphore(MAX_CONCURRENT_CONNECTIONS)
+
     async def handle_client(reader: StreamReader, writer: StreamWriter):
-        await client_handler(reader, writer, handler, storage)
+        await connection_semaphore.acquire()
+        try:
+            await client_handler(reader, writer, handler, storage)
+        finally:
+            connection_semaphore.release()
 
     server: Server = await asyncio.start_server(client_connected_cb=handle_client,
                                                 host=host_ip,
