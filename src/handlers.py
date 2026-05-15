@@ -3,6 +3,14 @@ from utils import encode_unsigned_varint, varint_encoding_size
 from storage import Storage
 
 
+TAG_BUFFER = b'\x00'
+THROTTLE_TIME = b'\x00\x00\x00\x00'
+ERROR_CODE_NONE = b'\x00\x00'
+ERROR_CODE_UNKNOWN_TOPIC_OR_PARTITION = b'\x00\x03'
+ERROR_CODE_UNKNOWN_SERVER_ERROR = b'\x00\x23'
+ERROR_CODE_UNKNOWN_TOPIC_ID = b'\x00\x64'
+
+
 class RequestHandler:
     def __init__(self, storage: Storage):
         self.storage = storage
@@ -19,11 +27,8 @@ class RequestHandler:
         request_api_version = int.from_bytes(client_request[6:8], byteorder="big")
 
         if request_api_version in (0, 1, 2, 3, 4):
-            error_code = int(0).to_bytes(2, byteorder="big")
             api_key_array_length = int(5).to_bytes(1, byteorder="big")
             api_key_min = int(0).to_bytes(2, byteorder="big")
-            tag_buffer = int(0).to_bytes(1, byteorder="big")
-            throttle_time = int(0).to_bytes(4, byteorder="big")
 
             # Produce API
             produce_api_key = int(0).to_bytes(2, byteorder="big")
@@ -42,30 +47,29 @@ class RequestHandler:
             topics_api_key_max = int(0).to_bytes(2, byteorder="big")
 
             resp_body = (
-                    error_code
+                    ERROR_CODE_NONE
                     + api_key_array_length
                     + versions_api_key
                     + api_key_min
                     + versions_api_key_max
-                    + tag_buffer
+                    + TAG_BUFFER
                     + topics_api_key
                     + api_key_min
                     + topics_api_key_max
-                    + tag_buffer
+                    + TAG_BUFFER
                     + fetch_api_key
                     + api_key_min
                     + fetch_api_key_max
-                    + tag_buffer
+                    + TAG_BUFFER
                     + produce_api_key
                     + api_key_min
                     + produce_api_key_max
-                    + tag_buffer
-                    + throttle_time
-                    + tag_buffer
+                    + TAG_BUFFER
+                    + THROTTLE_TIME
+                    + TAG_BUFFER
             )
         else:
-            error_code = int(35).to_bytes(2, byteorder="big")
-            resp_body = error_code
+            resp_body = ERROR_CODE_UNKNOWN_SERVER_ERROR
 
         return resp_body
 
@@ -100,8 +104,6 @@ class RequestHandler:
             "topic_name": 1
         }
 
-        tag_buffer = int(0).to_bytes(1, byteorder="big")
-        throttle_time = int(0).to_bytes(4, byteorder="big")
         next_cursor = int(255).to_bytes(1, byteorder="big")
 
         topic_array_index = (
@@ -131,7 +133,7 @@ class RequestHandler:
             resp_topic_data = self.get_response_topic_data(request_topic, topics)
             resp_topics_list.append(resp_topic_data)
 
-        resp_body = tag_buffer + throttle_time + b"".join(resp_topics_list) + next_cursor + tag_buffer
+        resp_body = TAG_BUFFER + THROTTLE_TIME + b"".join(resp_topics_list) + next_cursor + TAG_BUFFER
 
         return resp_body
 
@@ -191,22 +193,18 @@ class RequestHandler:
         partitions_array_length = client_request[topics_array_index + 17 : topics_array_index + 18]
         partition_index = client_request[topics_array_index + 18 : topics_array_index + 22]
 
-        tag_buffer = int(0).to_bytes(1, byteorder="big")
-        throttle_time = int(0).to_bytes(4, byteorder="big")
-        error_code = int(0).to_bytes(2, byteorder="big")
-
         if topic_uuid in topics_by_uuid:
             topic_data = topics_by_uuid[topic_uuid]
             topic_name = topic_data["topic_name"]
 
-            partition_error_code = int(0).to_bytes(2, byteorder="big")
+            partition_error_code = ERROR_CODE_NONE
             partition_idx = int.from_bytes(partition_index, byteorder="big")
             partition_records_array = await self.storage.read_partition_log(topic_name, partition_idx)
 
             partition_records_array = encode_unsigned_varint(len(partition_records_array) + 1) + partition_records_array
 
         else:
-            partition_error_code = int(100).to_bytes(2, byteorder="big")
+            partition_error_code = ERROR_CODE_UNKNOWN_TOPIC_ID
             partition_records_array = int(0).to_bytes(1, byteorder="big")
 
         partition_high_watermark = int(0).to_bytes(8, byteorder="big")
@@ -231,19 +229,19 @@ class RequestHandler:
                 + partition_diverging_epoch_array
                 + partition_current_leader_array
                 + partition_snapshot_id_array
-                + tag_buffer
+                + TAG_BUFFER
         )
-        topics_array = topics_array_length + topic_uuid + partitions_array + tag_buffer
+        topics_array = topics_array_length + topic_uuid + partitions_array + TAG_BUFFER
         node_endpoints_array = int(1).to_bytes(1, byteorder="big")
 
         resp_body = (
-                tag_buffer
-                + throttle_time
-                + error_code
+                TAG_BUFFER
+                + THROTTLE_TIME
+                + ERROR_CODE_NONE
                 + session_id
                 + topics_array
                 + node_endpoints_array
-                + tag_buffer
+                + TAG_BUFFER
         )
 
         return resp_body
@@ -297,10 +295,7 @@ class RequestHandler:
             topics_resp_list.append(topics_response)
             topic_index = topics_next_index
 
-        tag_buffer = int(0).to_bytes(1, byteorder="big")
-        throttle_time = int(0).to_bytes(4, byteorder="big")
-
-        resp_body = tag_buffer + b"".join(topics_resp_list) + throttle_time + tag_buffer
+        resp_body = TAG_BUFFER + b"".join(topics_resp_list) + THROTTLE_TIME + TAG_BUFFER
         return resp_body
 
     async def produce_partition_response(
@@ -327,7 +322,6 @@ class RequestHandler:
                  - The next index in the client request as an integer.
         """
 
-        tag_buffer = int(0).to_bytes(1, byteorder="big")
         partition_id_size_length = 4
         partition_index = client_request[partition_id_index : partition_id_index + partition_id_size_length]
 
@@ -348,13 +342,13 @@ class RequestHandler:
                 valid_topic_and_partition = True
 
         if valid_topic_and_partition:
-            error_code = int(0).to_bytes(2, byteorder="big")
+            error_code = ERROR_CODE_NONE
             base_offset = int(0).to_bytes(8, byteorder="big")
             log_start_offset = int(0).to_bytes(8, byteorder="big")
             partition_idx = int.from_bytes(partition_index, byteorder="big")
             await self.storage.write_partition_log(topic_name, partition_idx, record_batch)
         else:
-            error_code = int(3).to_bytes(2, byteorder="big")
+            error_code = ERROR_CODE_UNKNOWN_TOPIC_OR_PARTITION
             base_offset = int(-1).to_bytes(8, byteorder="big", signed=True)
             log_start_offset = int(-1).to_bytes(8, byteorder="big", signed=True)
 
@@ -370,7 +364,7 @@ class RequestHandler:
                 + log_start_offset
                 + records_array
                 + error_message
-                + tag_buffer
+                + TAG_BUFFER
         )
 
         next_index = (
@@ -402,7 +396,6 @@ class RequestHandler:
                  processing the topic.
         """
 
-        tag_buffer = int(0).to_bytes(1, byteorder="big")
         topic_name_size = int.from_bytes(client_request[topic_index : topic_index + 1], byteorder="big")
         topic_name = client_request[topic_index + 1 : topic_index + topic_name_size].decode("utf-8")
 
@@ -426,7 +419,7 @@ class RequestHandler:
                 topic_name_size.to_bytes(1, byteorder="big")
                 + topic_name.encode("utf-8")
                 + b"".join(partitions_resp_list)
-                + tag_buffer
+                + TAG_BUFFER
         )
 
         topics_next_index = partition_id_index + 1
@@ -446,20 +439,19 @@ class RequestHandler:
         :return: A byte-encoded representation of the response topic data, detailing the topic's metadata.
         """
 
-        tag_buffer = int(0).to_bytes(1, byteorder="big")
         is_internal = int(0).to_bytes(1, byteorder="big")
         topic_authorized_operations = int(0).to_bytes(4, byteorder="big")
         partition_data_list: list = []
 
         if request_topic not in topics:
             resp_topic_id = int(0).to_bytes(16, byteorder="big")
-            resp_topic_error_code = int(3).to_bytes(2, byteorder="big")
+            resp_topic_error_code = ERROR_CODE_UNKNOWN_TOPIC_OR_PARTITION
             partition_array_size = int(1).to_bytes(1, byteorder="big")
             partition_array = partition_array_size
         else:
             resp_topic_details = topics[request_topic]
             resp_topic_id = resp_topic_details["topic_uuid"].bytes
-            resp_topic_error_code = int(0).to_bytes(2, byteorder="big")
+            resp_topic_error_code = ERROR_CODE_NONE
 
             broker = int(1).to_bytes(1, byteorder="big")
             elr = int(1).to_bytes(1, byteorder="big")
@@ -487,7 +479,7 @@ class RequestHandler:
                         + elr
                         + last_elr
                         + offline_replicas
-                        + tag_buffer
+                        + TAG_BUFFER
                 )
 
             partition_array = partition_array_size + b"".join(partition_data_list)
@@ -502,7 +494,7 @@ class RequestHandler:
                 + is_internal
                 + partition_array
                 + topic_authorized_operations
-                + tag_buffer
+                + TAG_BUFFER
         )
 
         return resp_topic_data

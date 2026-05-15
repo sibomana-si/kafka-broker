@@ -50,11 +50,13 @@ async def client_handler(
     client_address: str = writer.get_extra_info("peername")
     logger.info(f"Connection accepted from {client_address}")
 
+    shutdown_task = asyncio.create_task(shutdown_event.wait())
+
     try:
         while not shutdown_event.is_set():
             try:
                 read_task = asyncio.create_task(reader.read(1024))
-                shutdown_task = asyncio.create_task(shutdown_event.wait())
+
                 done, pending = await asyncio.wait(
                     [read_task, shutdown_task],
                     timeout=CLIENT_READ_TIMEOUT,
@@ -115,6 +117,7 @@ async def client_handler(
     except Exception as e:
         logger.exception(f"Error in client_handler: {client_address}|{e}")
     finally:
+        shutdown_task.cancel()
         writer.close()
         try:
             await asyncio.wait_for(writer.wait_closed(), timeout=CLIENT_WRITE_TIMEOUT)
