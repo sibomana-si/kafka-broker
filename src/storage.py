@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import uuid
 from pathlib import Path
@@ -10,7 +11,7 @@ class Storage:
         self.log_dir = log_dir
         self.log_file_name = log_file_name
 
-    def load_metadata(self) -> dict[str, dict[str, Any]]:
+    async def load_metadata(self) -> dict[str, dict[str, Any]]:
         """
         Reads the cluster metadata file and parses its contents into a structured dictionary.
 
@@ -24,16 +25,15 @@ class Storage:
 
         cluster_metadata_file = f"{self.log_dir}/__cluster_metadata-0/{self.log_file_name}"
         topics = {}
-        if Path(cluster_metadata_file).is_file():
+        if await asyncio.to_thread(Path(cluster_metadata_file).is_file):
             try:
-                with open(cluster_metadata_file, 'rb') as f:
-                    cluster_metadata = f.read()
-                    topics = self._parse_cluster_metadata(cluster_metadata)
+                cluster_metadata = await self._read_file(cluster_metadata_file)
+                topics = await asyncio.to_thread(self._parse_cluster_metadata, cluster_metadata)
             except Exception as e:
                 logger.error(f"Failed to load metadata: {e}")
         return topics
 
-    def read_partition_log(self, topic_name: str, partition_index: int) -> bytes:
+    async def read_partition_log(self, topic_name: str, partition_index: int) -> bytes:
         """
         Reads the content of a specific partition log file for a given topic.
 
@@ -48,12 +48,12 @@ class Storage:
         """
 
         log_file = f"{self.log_dir}/{topic_name}-{partition_index}/{self.log_file_name}"
-        if Path(log_file).is_file() and Path(log_file).stat().st_size > 0:
-            with open(log_file, 'rb') as f:
-                return f.read()
+        path = Path(log_file)
+        if await asyncio.to_thread(lambda: path.is_file() and path.stat().st_size > 0):
+            return await self._read_file(log_file)
         return b""
 
-    def write_partition_log(self, topic_name: str, partition_index: int, data: bytes) -> None:
+    async def write_partition_log(self, topic_name: str, partition_index: int, data: bytes) -> None:
         """
         Writes data to a specific partition log file.
 
@@ -68,8 +68,19 @@ class Storage:
         """
 
         log_file = f"{self.log_dir}/{topic_name}-{partition_index}/{self.log_file_name}"
-        with open(log_file, 'wb') as f:
-            f.write(data)
+        await self._write_file(log_file, data)
+
+    async def _read_file(self, file_path: str) -> bytes:
+        def _read():
+            with open(file_path, 'rb') as f:
+                return f.read()
+        return await asyncio.to_thread(_read)
+
+    async def _write_file(self, file_path: str, data: bytes) -> None:
+        def _write():
+            with open(file_path, 'wb') as f:
+                f.write(data)
+        await asyncio.to_thread(_write)
 
     def _parse_cluster_metadata(self, cluster_metadata: bytes) -> dict:
         """
@@ -208,4 +219,3 @@ class Storage:
             processed_record["type"] = "unknown"
 
         return processed_record
-

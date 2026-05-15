@@ -90,7 +90,7 @@ async def client_handler(
             resp_body = b''
 
             if request_api_key in api_handlers:
-                topics = storage.load_metadata()
+                topics = await storage.load_metadata()
                 resp_body = await api_handlers[request_api_key](client_request, topics)
             else:
                 logger.error(f"Unsupported API: {request_api_key}|{client_request.hex()}")

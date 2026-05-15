@@ -172,7 +172,7 @@ class RequestHandler:
             if topics[topic]["topic_uuid"] == uuid.UUID(bytes=topic_uuid):
                 partition_error_code = int(0).to_bytes(2, byteorder='big')
                 partition_idx = int.from_bytes(partition_index, byteorder='big')
-                partition_records_array = self.storage.read_partition_log(topic, partition_idx)
+                partition_records_array = await self.storage.read_partition_log(topic, partition_idx)
 
                 partition_records_array = encode_unsigned_varint(len(partition_records_array) + 1) \
                                           + partition_records_array
@@ -298,7 +298,7 @@ class RequestHandler:
             base_offset = int(0).to_bytes(8, byteorder='big')
             log_start_offset = int(0).to_bytes(8, byteorder='big')
             partition_idx = int.from_bytes(partition_index, byteorder='big')
-            self.storage.write_partition_log(topic_name, partition_idx, record_batch)
+            await self.storage.write_partition_log(topic_name, partition_idx, record_batch)
 
         else:
             error_code = int(3).to_bytes(2, byteorder='big')
@@ -409,4 +409,3 @@ class RequestHandler:
                           + is_internal + partition_array + topic_authorized_operations + tag_buffer
 
         return resp_topic_data
-
