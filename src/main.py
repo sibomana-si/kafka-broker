@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import signal
 from asyncio import StreamReader, StreamWriter, Server
 
 from storage import Storage
@@ -18,9 +19,16 @@ CLIENT_READ_TIMEOUT = 5
 CLIENT_WRITE_TIMEOUT = 5
 MAX_WRITE_RETRIES = 3
 MAX_CONCURRENT_CONNECTIONS = 100
+GRACEFUL_SHUTDOWN_TIMEOUT = 10.0
 
 
-async def client_handler(reader: StreamReader, writer: StreamWriter, handler: RequestHandler, storage: Storage) -> None:
+async def client_handler(
+        reader: StreamReader,
+        writer: StreamWriter,
+        handler: RequestHandler,
+        storage: Storage,
+        shutdown_event: asyncio.Event
+) -> None:
     """
     Handles communication with a single client, processing incoming requests and sending appropriate responses.
 
@@ -31,6 +39,7 @@ async def client_handler(reader: StreamReader, writer: StreamWriter, handler: Re
     :param writer: The output stream to send data back to the client.
     :param handler: An instance of the `RequestHandler` class responsible for handling specific API requests.
     :param storage: An instance of the `Storage` class for managing metadata required to handle requests.
+    :param shutdown_event: An event triggered when the server is shutting down.
     :return: None
     """
 
@@ -45,11 +54,33 @@ async def client_handler(reader: StreamReader, writer: StreamWriter, handler: Re
     }
 
     try:
-        while True:
+        while not shutdown_event.is_set():
             try:
-                client_request: bytes = await asyncio.wait_for(reader.read(1024), timeout=CLIENT_READ_TIMEOUT)
-            except asyncio.TimeoutError:
-                logger.warning(f"Client read timeout: {client_address}")
+                read_task = asyncio.create_task(reader.read(1024))
+                shutdown_task = asyncio.create_task(shutdown_event.wait())
+                done, pending = await asyncio.wait(
+                    [read_task, shutdown_task],
+                    timeout=CLIENT_READ_TIMEOUT,
+                    return_when=asyncio.FIRST_COMPLETED
+                )
+
+                if shutdown_task in done:
+                    logger.info(f"Shutdown event received, closing connection to {client_address}")
+                    read_task.cancel()
+                    break
+
+                if not done:
+                    # Timeout occurred
+                    read_task.cancel()
+                    logger.warning(f"Client read timeout: {client_address}")
+                    break
+
+                client_request: bytes = read_task.result()
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Read error: {e}")
                 break
 
             if not client_request:
@@ -99,22 +130,57 @@ async def main():
     handler = RequestHandler(storage)
 
     connection_semaphore = asyncio.Semaphore(MAX_CONCURRENT_CONNECTIONS)
+    shutdown_event = asyncio.Event()
+    active_connections = set()
+
+    def signal_handler():
+        logger.info("Received termination signal. Initiating graceful shutdown...")
+        shutdown_event.set()
+
+    # Register signal handlers for graceful shutdown
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, signal_handler)
 
     async def handle_client(reader: StreamReader, writer: StreamWriter):
         await connection_semaphore.acquire()
+
+        # Track the active connection task
+        current_task = asyncio.current_task()
+        active_connections.add(current_task)
+
         try:
-            await client_handler(reader, writer, handler, storage)
+            await client_handler(reader, writer, handler, storage, shutdown_event)
         finally:
+            active_connections.remove(current_task)
             connection_semaphore.release()
 
     server: Server = await asyncio.start_server(client_connected_cb=handle_client,
                                                 host=host_ip,
                                                 port=host_port,
                                                 reuse_port=True)
-    logger.info(server)
+    logger.info(f"Server started on {host_ip}:{host_port}")
 
-    async with server:
-        await server.serve_forever()
+    async def serve():
+        async with server:
+            try:
+                await shutdown_event.wait()
+            finally:
+                logger.info("Stopping server from accepting new connections.")
+                server.close()
+                await server.wait_closed()
+
+                if active_connections:
+                    logger.info(f"Waiting for {len(active_connections)} active connections to close...")
+                    done, pending = await asyncio.wait(active_connections, timeout=GRACEFUL_SHUTDOWN_TIMEOUT)
+
+                    if pending:
+                        logger.warning(f"Forcefully cancelling {len(pending)} pending connections.")
+                        for task in pending:
+                            task.cancel()
+
+    await serve()
+    logger.info("Server shutdown complete.")
 
 
 if __name__ == "__main__":
