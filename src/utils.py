@@ -11,18 +11,12 @@ def encode_unsigned_varint(value: int) -> bytes:
     if value < 0:
         raise ValueError("cannot encode negative values")
 
-    encoded = bytearray()
-
-    while True:
-        to_write = value & 0x7F
+    res = []
+    while value >= 0x80:
+        res.append((value & 0x7f) | 0x80)
         value >>= 7
-        if value:
-            encoded.append(to_write | 0x80)
-        else:
-            encoded.append(to_write)
-            break
-
-    return bytes(encoded)
+    res.append(value)
+    return bytes(res)
 
 def varint_encoding_size(request: bytes, index: int) -> int:
     """

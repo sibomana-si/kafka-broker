@@ -2,8 +2,8 @@ import asyncio
 import logging
 from asyncio import StreamReader, StreamWriter, Server
 
-from app.storage import Storage
-from app.handlers import RequestHandler
+from storage import Storage
+from handlers import RequestHandler
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
@@ -14,6 +14,9 @@ API_VERSIONS_KEY = 18
 DESCRIBE_TOPIC_PARTITIONS_KEY = 75
 LOG_FILES_DIR = "/tmp/kraft-combined-logs"
 LOG_FILE_NAME = "00000000000000000000.log"
+CLIENT_READ_TIMEOUT = 5
+CLIENT_WRITE_TIMEOUT = 5
+MAX_WRITE_RETRIES = 3
 
 
 async def client_handler(reader: StreamReader, writer: StreamWriter, handler: RequestHandler, storage: Storage) -> None:
@@ -42,7 +45,12 @@ async def client_handler(reader: StreamReader, writer: StreamWriter, handler: Re
 
     try:
         while True:
-            client_request: bytes = await reader.read(1024)
+            try:
+                client_request: bytes = await asyncio.wait_for(reader.read(1024), timeout=CLIENT_READ_TIMEOUT)
+            except asyncio.TimeoutError:
+                logger.warning(f"Client read timeout: {client_address}")
+                break
+
             if not client_request:
                 break
             request_api_key = int.from_bytes(client_request[4:6], byteorder='big')
@@ -58,13 +66,28 @@ async def client_handler(reader: StreamReader, writer: StreamWriter, handler: Re
             msg_size = len(correlation_id) + len(resp_body)
             resp_msg_size = int(msg_size).to_bytes(4, byteorder='big')
             resp = resp_msg_size + correlation_id + resp_body
-            writer.write(resp)
-            await writer.drain()
+
+            for attempt in range(MAX_WRITE_RETRIES):
+                try:
+                    writer.write(resp)
+                    await asyncio.wait_for(writer.drain(), timeout=CLIENT_WRITE_TIMEOUT)
+                    break
+                except (asyncio.TimeoutError, ConnectionError) as e:
+                    logger.warning(f"Write attempt {attempt + 1} failed for {client_address}: {e}")
+                    if attempt == MAX_WRITE_RETRIES - 1:
+                        logger.error(f"Max write retries reached for {client_address}. Closing connection.")
+                        return
+
     except Exception as e:
         logger.exception(f"Error in client_handler: {client_address}|{e}")
     finally:
         writer.close()
-        await writer.wait_closed()
+        try:
+            await asyncio.wait_for(writer.wait_closed(), timeout=CLIENT_WRITE_TIMEOUT)
+        except asyncio.TimeoutError:
+            logger.warning(f"Timeout while waiting for connection to close: {client_address}")
+        except Exception as e:
+            logger.warning(f"Error while waiting for connection to close: {client_address}|{e}")
 
 
 async def main():

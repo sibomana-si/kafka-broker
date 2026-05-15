@@ -1,7 +1,7 @@
 import uuid
 from typing import Any
-from app.utils import encode_unsigned_varint, varint_encoding_size
-from app.storage import Storage
+from utils import encode_unsigned_varint, varint_encoding_size
+from storage import Storage
 
 
 class RequestHandler:
