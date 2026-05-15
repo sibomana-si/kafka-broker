@@ -18,39 +18,55 @@ class RequestHandler:
                 supported API key information.
         """
 
-        request_api_version = int.from_bytes(client_request[6:8], byteorder='big')
+        request_api_version = int.from_bytes(client_request[6:8], byteorder="big")
 
         if request_api_version in (0, 1, 2, 3, 4):
-            error_code = int(0).to_bytes(2, byteorder='big')
-            api_key_array_length = int(5).to_bytes(1, byteorder='big')
-            api_key_min = int(0).to_bytes(2, byteorder='big')
-            tag_buffer = int(0).to_bytes(1, byteorder='big')
-            throttle_time = int(0).to_bytes(4, byteorder='big')
+            error_code = int(0).to_bytes(2, byteorder="big")
+            api_key_array_length = int(5).to_bytes(1, byteorder="big")
+            api_key_min = int(0).to_bytes(2, byteorder="big")
+            tag_buffer = int(0).to_bytes(1, byteorder="big")
+            throttle_time = int(0).to_bytes(4, byteorder="big")
 
             # Produce API
-            produce_api_key = int(0).to_bytes(2, byteorder='big')
-            produce_api_key_max = int(11).to_bytes(2, byteorder='big')
+            produce_api_key = int(0).to_bytes(2, byteorder="big")
+            produce_api_key_max = int(11).to_bytes(2, byteorder="big")
 
             # Fetch API
-            fetch_api_key = int('1').to_bytes(2, byteorder='big')
-            fetch_api_key_max = int(16).to_bytes(2, byteorder='big')
+            fetch_api_key = int(1).to_bytes(2, byteorder="big")
+            fetch_api_key_max = int(16).to_bytes(2, byteorder="big")
 
             # ApiVersions API
-            versions_api_key = int('18').to_bytes(2, byteorder='big')
-            versions_api_key_max = int(4).to_bytes(2, byteorder='big')
+            versions_api_key = int(18).to_bytes(2, byteorder="big")
+            versions_api_key_max = int(4).to_bytes(2, byteorder="big")
 
             # DescribeTopicPartitions API
-            topics_api_key = int('75').to_bytes(2, byteorder='big')
-            topics_api_key_max = int(0).to_bytes(2, byteorder='big')
+            topics_api_key = int(75).to_bytes(2, byteorder="big")
+            topics_api_key_max = int(0).to_bytes(2, byteorder="big")
 
-            resp_body = error_code + api_key_array_length \
-                        + versions_api_key + api_key_min + versions_api_key_max + tag_buffer \
-                        + topics_api_key + api_key_min + topics_api_key_max + tag_buffer \
-                        + fetch_api_key + api_key_min + fetch_api_key_max + tag_buffer \
-                        + produce_api_key + api_key_min + produce_api_key_max + tag_buffer \
-                        + throttle_time + tag_buffer
+            resp_body = (
+                    error_code
+                    + api_key_array_length
+                    + versions_api_key
+                    + api_key_min
+                    + versions_api_key_max
+                    + tag_buffer
+                    + topics_api_key
+                    + api_key_min
+                    + topics_api_key_max
+                    + tag_buffer
+                    + fetch_api_key
+                    + api_key_min
+                    + fetch_api_key_max
+                    + tag_buffer
+                    + produce_api_key
+                    + api_key_min
+                    + produce_api_key_max
+                    + tag_buffer
+                    + throttle_time
+                    + tag_buffer
+            )
         else:
-            error_code = int(35).to_bytes(2, byteorder='big')
+            error_code = int(35).to_bytes(2, byteorder="big")
             resp_body = error_code
 
         return resp_body
@@ -73,7 +89,7 @@ class RequestHandler:
         :raises KeyError: Raised if a requested topic is not present in the provided topics dictionary.
         """
 
-        client_id_length = int.from_bytes(client_request[12:14], byteorder='big')
+        client_id_length = int.from_bytes(client_request[12:14], byteorder="big")
 
         field_sizes = {
             "message": 4,
@@ -86,22 +102,28 @@ class RequestHandler:
             "topic_name": 1
         }
 
-        tag_buffer = int(0).to_bytes(1, byteorder='big')
-        throttle_time = int(0).to_bytes(4, byteorder='big')
-        next_cursor = int(255).to_bytes(1, byteorder='big')
+        tag_buffer = int(0).to_bytes(1, byteorder="big")
+        throttle_time = int(0).to_bytes(4, byteorder="big")
+        next_cursor = int(255).to_bytes(1, byteorder="big")
 
-        topic_array_index = field_sizes["message"] + field_sizes["api_key"] + field_sizes["api_version"] \
-                                  + field_sizes["correlation_id"] + field_sizes["client_id"] \
-                                  + client_id_length + field_sizes["tag_buffer"]
+        topic_array_index = (
+                field_sizes["message"]
+                + field_sizes["api_key"]
+                + field_sizes["api_version"]
+                + field_sizes["correlation_id"]
+                + field_sizes["client_id"]
+                + client_id_length
+                + field_sizes["tag_buffer"]
+        )
 
-        topics_array_length = client_request[topic_array_index: topic_array_index + 1]
+        topics_array_length = client_request[topic_array_index : topic_array_index + 1]
 
         request_topics = []
         topic_index = topic_array_index + 1
 
-        for _ in range(int.from_bytes(topics_array_length, byteorder='big') - 1):
-            topic_name_length = int.from_bytes(client_request[topic_index: topic_index + 1], byteorder='big')
-            topic_name = client_request[topic_index + 1: topic_index + topic_name_length].decode("utf-8")
+        for _ in range(int.from_bytes(topics_array_length, byteorder="big") - 1):
+            topic_name_length = int.from_bytes(client_request[topic_index : topic_index + 1], byteorder="big")
+            topic_name = client_request[topic_index + 1 : topic_index + topic_name_length].decode("utf-8")
             request_topics.append(topic_name)
             topic_index += topic_name_length + 1
 
@@ -133,7 +155,7 @@ class RequestHandler:
                  error message if the request could not be fulfilled.
         """
 
-        client_id_length = int.from_bytes(client_request[12:14], byteorder='big')
+        client_id_length = int.from_bytes(client_request[12:14], byteorder="big")
 
         field_sizes = {
             "message": 4,
@@ -150,57 +172,80 @@ class RequestHandler:
             "session_epoch": 4
         }
 
-        session_id_index = field_sizes["message"] + field_sizes["api_key"] + field_sizes["api_version"] \
-                            + field_sizes["correlation_id"] + field_sizes["client_id"] \
-                            + client_id_length + field_sizes["tag_buffer"] \
-                            + field_sizes["max_wait_ms"] + field_sizes["min_bytes"] + field_sizes["max_bytes"] \
-                            + field_sizes["isolation_level"]
+        session_id_index = (
+                field_sizes["message"]
+                + field_sizes["api_key"]
+                + field_sizes["api_version"]
+                + field_sizes["correlation_id"]
+                + field_sizes["client_id"]
+                + client_id_length
+                + field_sizes["tag_buffer"]
+                + field_sizes["max_wait_ms"]
+                + field_sizes["min_bytes"]
+                + field_sizes["max_bytes"]
+                + field_sizes["isolation_level"]
+        )
 
         topics_array_index =  session_id_index + field_sizes["session_id"] + field_sizes["session_epoch"]
 
-        session_id = client_request[session_id_index: session_id_index + 4]
-        topics_array_length = client_request[topics_array_index: topics_array_index + 1]
-        topic_uuid = client_request[topics_array_index + 1: topics_array_index + 17]
-        partitions_array_length = client_request[topics_array_index + 17: topics_array_index + 18]
-        partition_index = client_request[topics_array_index + 18: topics_array_index + 22]
+        session_id = client_request[session_id_index : session_id_index + 4]
+        topics_array_length = client_request[topics_array_index : topics_array_index + 1]
+        topic_uuid = client_request[topics_array_index + 1 : topics_array_index + 17]
+        partitions_array_length = client_request[topics_array_index + 17 : topics_array_index + 18]
+        partition_index = client_request[topics_array_index + 18 : topics_array_index + 22]
 
-        tag_buffer = int(0).to_bytes(1, byteorder='big')
-        throttle_time = int(0).to_bytes(4, byteorder='big')
-        error_code = int(0).to_bytes(2, byteorder='big')
+        tag_buffer = int(0).to_bytes(1, byteorder="big")
+        throttle_time = int(0).to_bytes(4, byteorder="big")
+        error_code = int(0).to_bytes(2, byteorder="big")
 
         for topic in topics:
             if topics[topic]["topic_uuid"] == uuid.UUID(bytes=topic_uuid):
-                partition_error_code = int(0).to_bytes(2, byteorder='big')
-                partition_idx = int.from_bytes(partition_index, byteorder='big')
+                partition_error_code = int(0).to_bytes(2, byteorder="big")
+                partition_idx = int.from_bytes(partition_index, byteorder="big")
                 partition_records_array = await self.storage.read_partition_log(topic, partition_idx)
-
                 partition_records_array = encode_unsigned_varint(len(partition_records_array) + 1) \
                                           + partition_records_array
                 break
         else:
-            partition_error_code = int(100).to_bytes(2, byteorder='big')
-            partition_records_array = int(0).to_bytes(1, byteorder='big')
+            partition_error_code = int(100).to_bytes(2, byteorder="big")
+            partition_records_array = int(0).to_bytes(1, byteorder="big")
 
-        partition_high_watermark = int(0).to_bytes(8, byteorder='big')
-        partitions_last_stable_offset = int(0).to_bytes(8, byteorder='big')
-        partition_log_start_offset = int(0).to_bytes(8, byteorder='big')
-        partition_aborted_transactions = int(1).to_bytes(1, byteorder='big')
-        partition_preferred_read_replica = int(0).to_bytes(4, byteorder='big')
-        partition_diverging_epoch_array = int(0).to_bytes(1, byteorder='big')
-        partition_current_leader_array = int(0).to_bytes(1, byteorder='big')
-        partition_snapshot_id_array = int(0).to_bytes(1, byteorder='big')
+        partition_high_watermark = int(0).to_bytes(8, byteorder="big")
+        partitions_last_stable_offset = int(0).to_bytes(8, byteorder="big")
+        partition_log_start_offset = int(0).to_bytes(8, byteorder="big")
+        partition_aborted_transactions = int(1).to_bytes(1, byteorder="big")
+        partition_preferred_read_replica = int(0).to_bytes(4, byteorder="big")
+        partition_diverging_epoch_array = int(0).to_bytes(1, byteorder="big")
+        partition_current_leader_array = int(0).to_bytes(1, byteorder="big")
+        partition_snapshot_id_array = int(0).to_bytes(1, byteorder="big")
 
-        partitions_array = partitions_array_length + partition_index + partition_error_code \
-                           + partition_high_watermark + partitions_last_stable_offset \
-                           + partition_log_start_offset + partition_aborted_transactions \
-                           + partition_preferred_read_replica + partition_records_array \
-                           + partition_diverging_epoch_array + partition_current_leader_array \
-                           + partition_snapshot_id_array + tag_buffer
+        partitions_array = (
+                partitions_array_length
+                + partition_index
+                + partition_error_code
+                + partition_high_watermark
+                + partitions_last_stable_offset
+                + partition_log_start_offset
+                + partition_aborted_transactions
+                + partition_preferred_read_replica
+                + partition_records_array
+                + partition_diverging_epoch_array
+                + partition_current_leader_array
+                + partition_snapshot_id_array
+                + tag_buffer
+        )
         topics_array = topics_array_length + topic_uuid + partitions_array + tag_buffer
-        node_endpoints_array = int(1).to_bytes(1, byteorder='big')
+        node_endpoints_array = int(1).to_bytes(1, byteorder="big")
 
-        resp_body = tag_buffer + throttle_time + error_code + session_id \
-                    + topics_array  + node_endpoints_array + tag_buffer
+        resp_body = (
+                tag_buffer
+                + throttle_time
+                + error_code
+                + session_id
+                + topics_array
+                + node_endpoints_array
+                + tag_buffer
+        )
 
         return resp_body
 
@@ -216,7 +261,7 @@ class RequestHandler:
             request.
         """
 
-        client_id_length = int.from_bytes(client_request[12:14], byteorder='big')
+        client_id_length = int.from_bytes(client_request[12:14], byteorder="big")
 
         field_sizes = {
             "message": 4,
@@ -230,14 +275,22 @@ class RequestHandler:
             "timeout": 4
         }
 
-        topics_array_index = field_sizes["message"] + field_sizes["api_key"] + field_sizes["api_version"] \
-                            + field_sizes["correlation_id"] + field_sizes["client_id"] \
-                            + client_id_length + field_sizes["tag_buffer"] \
-                            + field_sizes["transactional_id"] + field_sizes["required_acks"] + field_sizes["timeout"]
+        topics_array_index = (
+                field_sizes["message"]
+                + field_sizes["api_key"]
+                + field_sizes["api_version"]
+                + field_sizes["correlation_id"]
+                + field_sizes["client_id"]
+                + client_id_length
+                + field_sizes["tag_buffer"]
+                + field_sizes["transactional_id"]
+                + field_sizes["required_acks"]
+                + field_sizes["timeout"]
+        )
 
-        topics_array_length = client_request[topics_array_index: topics_array_index + 1]
+        topics_array_length = client_request[topics_array_index : topics_array_index + 1]
         topics_resp_array = topics_array_length
-        topics_array_size = int.from_bytes(topics_array_length, byteorder='big') - 1
+        topics_array_size = int.from_bytes(topics_array_length, byteorder="big") - 1
         topic_index = topics_array_index + 1
 
         for _ in range(topics_array_size):
@@ -245,16 +298,19 @@ class RequestHandler:
             topics_resp_array += topics_response
             topic_index = topics_next_index
 
-        tag_buffer = int(0).to_bytes(1, byteorder='big')
-        throttle_time = int(0).to_bytes(4, byteorder='big')
+        tag_buffer = int(0).to_bytes(1, byteorder="big")
+        throttle_time = int(0).to_bytes(4, byteorder="big")
 
         resp_body = tag_buffer + topics_resp_array + throttle_time + tag_buffer
         return resp_body
 
-    async def produce_partition_response(self, client_request: bytes,
-                                   partition_id_index: int,
-                                   topic_name: str,
-                                   topics: dict) -> tuple[bytes, int]:
+    async def produce_partition_response(
+            self,
+            client_request: bytes,
+            partition_id_index: int,
+            topic_name: str,
+            topics: dict
+    ) -> tuple[bytes, int]:
         """
         Generate a partition response for a produce request and return the response alongside the next index.
 
@@ -272,52 +328,70 @@ class RequestHandler:
                  - The next index in the client request as an integer.
         """
 
-        tag_buffer = int(0).to_bytes(1, byteorder='big')
+        tag_buffer = int(0).to_bytes(1, byteorder="big")
         partition_id_size_length = 4
-        partition_index = client_request[partition_id_index: partition_id_index + partition_id_size_length]
+        partition_index = client_request[partition_id_index : partition_id_index + partition_id_size_length]
 
         record_batch_array_index = partition_id_index + partition_id_size_length
         record_batch_size_length = varint_encoding_size(client_request, record_batch_array_index + 1)
         record_batch_size = int.from_bytes(
-            client_request[record_batch_array_index: record_batch_array_index + record_batch_size_length],
-            byteorder='big')
+            client_request[record_batch_array_index : record_batch_array_index + record_batch_size_length],
+            byteorder="big"
+        )
         record_batch_index = record_batch_array_index + record_batch_size_length
-        record_batch = client_request[record_batch_index: record_batch_index + record_batch_size]
+        record_batch = client_request[record_batch_index : record_batch_index + record_batch_size]
 
         valid_topic_and_partition = False
 
         if topic_name in topics:
-            partition_idx = int.from_bytes(partition_index, byteorder='big')
+            partition_idx = int.from_bytes(partition_index, byteorder="big")
             for partition in topics[topic_name]["partitions"]:
                 if partition_idx == partition["partition_index"]:
                     valid_topic_and_partition = True
                     break
 
         if valid_topic_and_partition:
-            error_code = int(0).to_bytes(2, byteorder='big')
-            base_offset = int(0).to_bytes(8, byteorder='big')
-            log_start_offset = int(0).to_bytes(8, byteorder='big')
-            partition_idx = int.from_bytes(partition_index, byteorder='big')
+            error_code = int(0).to_bytes(2, byteorder="big")
+            base_offset = int(0).to_bytes(8, byteorder="big")
+            log_start_offset = int(0).to_bytes(8, byteorder="big")
+            partition_idx = int.from_bytes(partition_index, byteorder="big")
             await self.storage.write_partition_log(topic_name, partition_idx, record_batch)
 
         else:
-            error_code = int(3).to_bytes(2, byteorder='big')
-            base_offset = int(-1).to_bytes(8, byteorder='big', signed=True)
-            log_start_offset = int(-1).to_bytes(8, byteorder='big', signed=True)
+            error_code = int(3).to_bytes(2, byteorder="big")
+            base_offset = int(-1).to_bytes(8, byteorder="big", signed=True)
+            log_start_offset = int(-1).to_bytes(8, byteorder="big", signed=True)
 
-        log_append_time = int(-1).to_bytes(8, byteorder='big', signed=True)
-        records_array = int(1).to_bytes(1, byteorder='big')
-        error_message = int(0).to_bytes(1, byteorder='big')
+        log_append_time = int(-1).to_bytes(8, byteorder="big", signed=True)
+        records_array = int(1).to_bytes(1, byteorder="big")
+        error_message = int(0).to_bytes(1, byteorder="big")
 
-        partition_resp = partition_index + error_code + base_offset + log_append_time \
-                         + log_start_offset + records_array + error_message + tag_buffer
-        next_index = partition_id_index + partition_id_size_length + record_batch_size_length + record_batch_size
+        partition_resp = (
+                partition_index
+                + error_code
+                + base_offset
+                + log_append_time
+                + log_start_offset
+                + records_array
+                + error_message
+                + tag_buffer
+        )
+
+        next_index = (
+                partition_id_index
+                + partition_id_size_length
+                + record_batch_size_length
+                + record_batch_size
+        )
 
         return partition_resp, next_index
 
-    async def produce_topic_response(self, client_request: bytes,
-                               topic_index: int,
-                               topics: dict) -> tuple[bytes, int]:
+    async def produce_topic_response(
+            self,
+            client_request: bytes,
+            topic_index: int,
+            topics: dict
+    ) -> tuple[bytes, int]:
         """
         Generates a response for a specific Kafka topic by parsing the client request and processing each partition
         within the topic.
@@ -332,25 +406,32 @@ class RequestHandler:
                  processing the topic.
         """
 
-        tag_buffer = int(0).to_bytes(1, byteorder='big')
-        topic_name_size = int.from_bytes(client_request[topic_index: topic_index + 1], byteorder='big')
-        topic_name = client_request[topic_index + 1: topic_index + topic_name_size].decode("utf-8")
+        tag_buffer = int(0).to_bytes(1, byteorder="big")
+        topic_name_size = int.from_bytes(client_request[topic_index : topic_index + 1], byteorder="big")
+        topic_name = client_request[topic_index + 1 : topic_index + topic_name_size].decode("utf-8")
 
         partition_array_index = topic_index + topic_name_size
-        partitions_array_length = client_request[partition_array_index: partition_array_index + 1]
+        partitions_array_length = client_request[partition_array_index : partition_array_index + 1]
         partitions_resp_array = partitions_array_length
-        partitions_array_size = int.from_bytes(partitions_array_length, byteorder='big') - 1
+        partitions_array_size = int.from_bytes(partitions_array_length, byteorder="big") - 1
         partition_id_index = partition_array_index + 1
 
         for _ in range(partitions_array_size):
-            partition_resp, next_partition_id_index = await self.produce_partition_response(client_request,
-                                                                                            partition_id_index,
-                                                                                            topic_name, topics)
+            partition_resp, next_partition_id_index = await self.produce_partition_response(
+                client_request,
+                partition_id_index,
+                topic_name,
+                topics
+            )
             partitions_resp_array += partition_resp
             partition_id_index = next_partition_id_index
 
-        topics_resp = topic_name_size.to_bytes(1, byteorder='big') + topic_name.encode('utf-8') \
-                      + partitions_resp_array + tag_buffer
+        topics_resp = (
+                topic_name_size.to_bytes(1, byteorder="big")
+                + topic_name.encode("utf-8")
+                + partitions_resp_array
+                + tag_buffer
+        )
 
         topics_next_index = partition_id_index + 1
 
@@ -369,43 +450,63 @@ class RequestHandler:
         :return: A byte-encoded representation of the response topic data, detailing the topic's metadata.
         """
 
-        tag_buffer = int(0).to_bytes(1, byteorder='big')
-        is_internal = int(0).to_bytes(1, byteorder='big')
-        topic_authorized_operations = int(0).to_bytes(4, byteorder='big')
+        tag_buffer = int(0).to_bytes(1, byteorder="big")
+        is_internal = int(0).to_bytes(1, byteorder="big")
+        topic_authorized_operations = int(0).to_bytes(4, byteorder="big")
         partition_data = b""
 
         if request_topic not in topics:
-            resp_topic_id = int(0).to_bytes(16, byteorder='big')
-            resp_topic_error_code = int(3).to_bytes(2, byteorder='big')
-            partition_array_size = int(1).to_bytes(1, byteorder='big')
+            resp_topic_id = int(0).to_bytes(16, byteorder="big")
+            resp_topic_error_code = int(3).to_bytes(2, byteorder="big")
+            partition_array_size = int(1).to_bytes(1, byteorder="big")
             partition_array = partition_array_size
         else:
             resp_topic_details = topics[request_topic]
             resp_topic_id = resp_topic_details["topic_uuid"].bytes
-            resp_topic_error_code = int(0).to_bytes(2, byteorder='big')
+            resp_topic_error_code = int(0).to_bytes(2, byteorder="big")
 
-            broker = int(1).to_bytes(1, byteorder='big')
-            elr = int(1).to_bytes(1, byteorder='big')
-            last_elr = int(1).to_bytes(1, byteorder='big')
-            offline_replicas = int(1).to_bytes(1, byteorder='big')
+            broker = int(1).to_bytes(1, byteorder="big")
+            elr = int(1).to_bytes(1, byteorder="big")
+            last_elr = int(1).to_bytes(1, byteorder="big")
+            offline_replicas = int(1).to_bytes(1, byteorder="big")
 
-            partition_array_size = (len(resp_topic_details["partitions"]) + 1).to_bytes(1, byteorder='big')
+            partition_array_size = (len(resp_topic_details["partitions"]) + 1).to_bytes(1, byteorder="big")
 
             for partition in resp_topic_details["partitions"]:
-                partition_index = partition["partition_index"].to_bytes(4, byteorder='big')
-                leader_id = partition["leader_id"].to_bytes(4, byteorder='big')
-                leader_epoch = partition["leader_epoch"].to_bytes(4, byteorder='big')
-                replica_nodes = partition["num_replicas"].to_bytes(4, byteorder='big')
-                isr_nodes = partition["num_isr"].to_bytes(4, byteorder='big')
+                partition_index = partition["partition_index"].to_bytes(4, byteorder="big")
+                leader_id = partition["leader_id"].to_bytes(4, byteorder="big")
+                leader_epoch = partition["leader_epoch"].to_bytes(4, byteorder="big")
+                replica_nodes = partition["num_replicas"].to_bytes(4, byteorder="big")
+                isr_nodes = partition["num_isr"].to_bytes(4, byteorder="big")
 
-                partition_data += (resp_topic_error_code + partition_index + leader_id + leader_epoch + replica_nodes + broker
-                                   + isr_nodes + broker + elr + last_elr + offline_replicas + tag_buffer)
+                partition_data += (
+                        resp_topic_error_code
+                        + partition_index
+                        + leader_id
+                        + leader_epoch
+                        + replica_nodes
+                        + broker
+                        + isr_nodes
+                        + broker
+                        + elr
+                        + last_elr
+                        + offline_replicas
+                        + tag_buffer
+                )
 
             partition_array = partition_array_size + partition_data
 
         resp_topic_name = request_topic.encode("utf-8")
-        resp_topic_name_length = int(len(resp_topic_name) + 1).to_bytes(1, byteorder='big')
-        resp_topic_data = resp_topic_error_code + resp_topic_name_length + resp_topic_name + resp_topic_id \
-                          + is_internal + partition_array + topic_authorized_operations + tag_buffer
+        resp_topic_name_length = int(len(resp_topic_name) + 1).to_bytes(1, byteorder="big")
+        resp_topic_data = (
+                resp_topic_error_code
+                + resp_topic_name_length
+                + resp_topic_name
+                + resp_topic_id
+                + is_internal
+                + partition_array
+                + topic_authorized_operations
+                + tag_buffer
+        )
 
         return resp_topic_data

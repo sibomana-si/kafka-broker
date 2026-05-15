@@ -2,6 +2,7 @@ import asyncio
 import logging
 import signal
 from asyncio import StreamReader, StreamWriter, Server
+from typing import Any
 
 from storage import Storage
 from handlers import RequestHandler
@@ -26,7 +27,7 @@ async def client_handler(
         reader: StreamReader,
         writer: StreamWriter,
         handler: RequestHandler,
-        storage: Storage,
+        topics: dict[str, dict[str, Any]],
         shutdown_event: asyncio.Event
 ) -> None:
     """
@@ -38,12 +39,12 @@ async def client_handler(
     :param reader: The input stream to read data received from the client.
     :param writer: The output stream to send data back to the client.
     :param handler: An instance of the `RequestHandler` class responsible for handling specific API requests.
-    :param storage: An instance of the `Storage` class for managing metadata required to handle requests.
+    :param topics: A dictionary containing the cluster metadata.
     :param shutdown_event: An event triggered when the server is shutting down.
     :return: None
     """
 
-    client_address: str = writer.get_extra_info('peername')
+    client_address: str = writer.get_extra_info("peername")
     logger.info(f"Connection accepted from {client_address}")
 
     api_handlers = {
@@ -85,18 +86,17 @@ async def client_handler(
 
             if not client_request:
                 break
-            request_api_key = int.from_bytes(client_request[4:6], byteorder='big')
+            request_api_key = int.from_bytes(client_request[4:6], byteorder="big")
             correlation_id = client_request[8:12]
-            resp_body = b''
+            resp_body = b""
 
             if request_api_key in api_handlers:
-                topics = await storage.load_metadata()
                 resp_body = await api_handlers[request_api_key](client_request, topics)
             else:
                 logger.error(f"Unsupported API: {request_api_key}|{client_request.hex()}")
 
             msg_size = len(correlation_id) + len(resp_body)
-            resp_msg_size = int(msg_size).to_bytes(4, byteorder='big')
+            resp_msg_size = int(msg_size).to_bytes(4, byteorder="big")
             resp = resp_msg_size + correlation_id + resp_body
 
             for attempt in range(MAX_WRITE_RETRIES):
@@ -127,6 +127,7 @@ async def main():
     host_port = 9092
     
     storage = Storage(LOG_FILES_DIR, LOG_FILE_NAME)
+    topics = await storage.load_metadata()
     handler = RequestHandler(storage)
 
     connection_semaphore = asyncio.Semaphore(MAX_CONCURRENT_CONNECTIONS)
@@ -150,15 +151,17 @@ async def main():
         active_connections.add(current_task)
 
         try:
-            await client_handler(reader, writer, handler, storage, shutdown_event)
+            await client_handler(reader, writer, handler, topics, shutdown_event)
         finally:
             active_connections.remove(current_task)
             connection_semaphore.release()
 
-    server: Server = await asyncio.start_server(client_connected_cb=handle_client,
-                                                host=host_ip,
-                                                port=host_port,
-                                                reuse_port=True)
+    server: Server = await asyncio.start_server(
+        client_connected_cb=handle_client,
+        host=host_ip,
+        port=host_port,
+        reuse_port=True
+    )
     logger.info(f"Server started on {host_ip}:{host_port}")
 
     async def serve():
