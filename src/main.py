@@ -21,6 +21,7 @@ CLIENT_WRITE_TIMEOUT = 5
 MAX_WRITE_RETRIES = 3
 MAX_CONCURRENT_CONNECTIONS = 100
 GRACEFUL_SHUTDOWN_TIMEOUT = 10.0
+BUFFER_FLUSH_INTERVAL = 10 # Flush buffer every 10 seconds
 
 
 async def client_handler(
@@ -122,6 +123,27 @@ async def client_handler(
             logger.warning(f"Error while waiting for connection to close: {client_address}|{e}")
 
 
+async def flush_buffers_periodically(storage: Storage, shutdown_event: asyncio.Event) -> None:
+    """
+    Periodically flushes the in-memory write buffers to disk.
+
+    This background task runs in a loop, sleeping for a specified interval
+    and then flushing the storage buffers. It continues until a shutdown
+    event is triggered.
+
+    :param storage: The storage instance with the buffers to flush.
+    :param shutdown_event: The event that signals the server to shut down.
+    :param storage:
+    :param shutdown_event:
+    :return:
+    """
+
+    while not shutdown_event.is_set():
+        await asyncio.sleep(BUFFER_FLUSH_INTERVAL)
+        logger.info("Flushing buffers to disk...")
+        await storage.flush_buffers()
+
+
 async def main():
     host_ip = "localhost"
     host_port = 9092
@@ -164,6 +186,9 @@ async def main():
     )
     logger.info(f"Server started on {host_ip}:{host_port}")
 
+    # Start the background task for flushing buffers
+    flush_task = asyncio.create_task(flush_buffers_periodically(storage, shutdown_event))
+
     async def serve():
         async with server:
             try:
@@ -181,6 +206,13 @@ async def main():
                         logger.warning(f"Forcefully cancelling {len(pending)} pending connections.")
                         for task in pending:
                             task.cancel()
+
+                # Stop the flush task and do a final flush
+                logger.info("Stopping buffer flush task...")
+                flush_task.cancel()
+                await asyncio.gather(flush_task, return_exceptions=True)
+                logger.info("Performing final buffer flush...")
+                await storage.flush_buffers()
 
     await serve()
     logger.info("Server shutdown complete.")

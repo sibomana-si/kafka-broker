@@ -1,15 +1,19 @@
 import asyncio
 import logging
 import uuid
+import os
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
+
 class Storage:
     def __init__(self, log_dir: str, log_file_name: str):
         self.log_dir = log_dir
         self.log_file_name = log_file_name
+        self.buffers: dict = {}
+        self.buffer_lock = asyncio.Lock()
 
     async def load_metadata(self) -> dict[str, dict[str, Any]]:
         """
@@ -49,9 +53,16 @@ class Storage:
 
         log_file = f"{self.log_dir}/{topic_name}-{partition_index}/{self.log_file_name}"
         path = Path(log_file)
+        disk_data = b""
+
         if await asyncio.to_thread(lambda: path.is_file() and path.stat().st_size > 0):
-            return await self._read_file(log_file)
-        return b""
+            disk_data = await self._read_file(log_file)
+
+        buffer_key = (topic_name, partition_index)
+        async with self.buffer_lock:
+            buffer_data = self.buffers.get(buffer_key, b"")
+
+        return disk_data + buffer_data
 
     async def write_partition_log(self, topic_name: str, partition_index: int, data: bytes) -> None:
         """
@@ -67,20 +78,82 @@ class Storage:
         :return: None
         """
 
-        log_file = f"{self.log_dir}/{topic_name}-{partition_index}/{self.log_file_name}"
-        await self._write_file(log_file, data)
+        buffer_key = (topic_name, partition_index)
+        async with self.buffer_lock:
+            if buffer_key not in self.buffers:
+                self.buffers[buffer_key] = b""
+            self.buffers[buffer_key] += data
+
+    async def flush_buffers(self) -> None:
+        """
+        Flushes all in-memory buffers to their respective log files on disk.
+
+        This method iterates through all the buffered data, identifies the appropriate
+        log file for each buffer, and writes the data to disk. This is useful for ensuring
+        data persistence, especially during graceful shutdowns.
+        :return: None
+        """
+
+        async with self.buffer_lock:
+            for (topic_name, partition_index), data in self.buffers.items():
+                if not data:
+                    continue
+                log_dir = f"{self.log_dir}/{topic_name}-{partition_index}"
+                await asyncio.to_thread(os.makedirs, log_dir, exist_ok=True)
+                log_file = f"{log_dir}/{self.log_file_name}"
+                await self._append_file(log_file, data)
+            self.buffers.clear()
 
     async def _read_file(self, file_path: str) -> bytes:
+        """
+        Reads the content of a file asynchronously and returns its binary content.
+
+        This method reads the file in binary mode and executes the read operation
+        in a separate thread to avoid blocking the main thread.
+
+        :param file_path: The path of the file to be read.
+        :return: The binary content of the file.
+        """
+
         def _read():
-            with open(file_path, 'rb') as f:
+            with open(file_path, "rb") as f:
                 return f.read()
         return await asyncio.to_thread(_read)
 
     async def _write_file(self, file_path: str, data: bytes) -> None:
+        """
+        Writes binary data asynchronously to a specified file.
+
+        This method uses a separate thread to handle file-writing operations,
+        ensuring that the main event loop remains non-blocking.
+
+        :param file_path: The path to the file where data will be written.
+        :param data: The binary data to be written to the file.
+        :return: None
+        """
+
         def _write():
-            with open(file_path, 'wb') as f:
+            with open(file_path, "wb") as f:
                 f.write(data)
         await asyncio.to_thread(_write)
+
+    async def _append_file(self, file_path: str, data: bytes) -> None:
+        """
+        Asynchronously appends binary data to a file.
+
+        This function opens the specified file in binary append mode ('ab') and writes
+        the provided binary data to the file. It performs the file I/O operation in a
+        separate thread, ensuring non-blocking behavior in async applications.
+
+        :param file_path: The path of the file to which the data will be appended.
+        :param data: The binary data to append to the file.
+        :return: None
+        """
+
+        def _append():
+            with open(file_path, "ab") as f:
+                f.write(data)
+        await asyncio.to_thread(_append)
 
     def _parse_cluster_metadata(self, cluster_metadata: bytes) -> dict:
         """
@@ -129,10 +202,10 @@ class Storage:
         """
 
         record_batch_size = 12 + int.from_bytes(
-            cluster_metadata[record_batch_index + 8: record_batch_index + 12],
-            byteorder='big'
+            cluster_metadata[record_batch_index + 8 : record_batch_index + 12],
+            byteorder="big"
         )
-        return cluster_metadata[record_batch_index: record_batch_index + record_batch_size]
+        return cluster_metadata[record_batch_index : record_batch_index + record_batch_size]
 
     @staticmethod
     def _process_record_batch(record_batch: bytes) -> list:
@@ -150,15 +223,15 @@ class Storage:
         """
 
         record_list = []
-        num_records = int.from_bytes(record_batch[57:61], byteorder='big')
+        num_records = int.from_bytes(record_batch[57:61], byteorder="big")
         record_array = record_batch[61:]
         for _ in range(num_records):
-            record_size = int.from_bytes(record_array[0:1], byteorder='big') // 2
-            if int.from_bytes(record_array[1:2], byteorder='big') == 0:
-                record = record_array[7:(record_size + 1)]
+            record_size = int.from_bytes(record_array[0:1], byteorder="big") // 2
+            if int.from_bytes(record_array[1:2], byteorder="big") == 0:
+                record = record_array[7 : (record_size + 1)]
                 next_record_index = record_size + 1
             else:
-                record = record_array[9: (record_size + 2)]
+                record = record_array[9 : (record_size + 2)]
                 next_record_index = record_size + 2
             record_list.append(record)
             record_array = record_array[next_record_index:]
@@ -182,38 +255,38 @@ class Storage:
         """
 
         processed_record: dict[str, Any] = {}
-        record_type = int.from_bytes(record[0:1], byteorder='big')
+        record_type = int.from_bytes(record[0:1], byteorder="big")
 
         if record_type == 2:
             processed_record["type"] = "topic"
             processed_record["partitions"] = []
 
-            topic_name_length = int.from_bytes(record[2:3], byteorder='big') - 1
-            topic_name = record[3: 3 + topic_name_length].decode("utf-8")
+            topic_name_length = int.from_bytes(record[2:3], byteorder="big") - 1
+            topic_name = record[3 : 3 + topic_name_length].decode("utf-8")
             processed_record["topic_name"] = topic_name
 
             topic_uuid_index = 3 + topic_name_length
-            topic_uuid = uuid.UUID(bytes=record[topic_uuid_index: topic_uuid_index + 16])
+            topic_uuid = uuid.UUID(bytes=record[topic_uuid_index : topic_uuid_index + 16])
             processed_record["topic_uuid"] = topic_uuid
         elif record_type == 3:
             processed_record["type"] = "partition"
 
-            partition_index = int.from_bytes(record[2:6], byteorder='big')
+            partition_index = int.from_bytes(record[2:6], byteorder="big")
             processed_record["partition_index"] = partition_index
 
             topic_uuid = uuid.UUID(bytes=record[6:22])
             processed_record["topic_uuid"] = topic_uuid
 
-            num_replicas = int.from_bytes(record[22:23], byteorder='big')
+            num_replicas = int.from_bytes(record[22:23], byteorder="big")
             processed_record["num_replicas"] = num_replicas
 
-            num_isr = int.from_bytes(record[27:28], byteorder='big')
+            num_isr = int.from_bytes(record[27:28], byteorder="big")
             processed_record["num_isr"] = num_isr
 
-            leader_id = int.from_bytes(record[34:38], byteorder='big')
+            leader_id = int.from_bytes(record[34:38], byteorder="big")
             processed_record["leader_id"] = leader_id
 
-            leader_epoch = int.from_bytes(record[38:42], byteorder='big')
+            leader_epoch = int.from_bytes(record[38:42], byteorder="big")
             processed_record["leader_epoch"] = leader_epoch
         else:
             processed_record["type"] = "unknown"
