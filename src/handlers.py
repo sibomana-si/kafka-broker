@@ -127,13 +127,13 @@ class RequestHandler:
             request_topics.append(topic_name)
             topic_index += topic_name_length + 1
 
-        resp_topics_array = topics_array_length
+        resp_topics_list = [topics_array_length]
 
         for request_topic in sorted(request_topics):
             resp_topic_data = self.get_response_topic_data(request_topic, topics)
-            resp_topics_array += resp_topic_data
+            resp_topics_list.append(resp_topic_data)
 
-        resp_body = tag_buffer + throttle_time + resp_topics_array + next_cursor + tag_buffer
+        resp_body = tag_buffer + throttle_time + b"".join(resp_topics_list) + next_cursor + tag_buffer
 
         return resp_body
 
@@ -289,19 +289,19 @@ class RequestHandler:
         )
 
         topics_array_length = client_request[topics_array_index : topics_array_index + 1]
-        topics_resp_array = topics_array_length
+        topics_resp_list = [topics_array_length]
         topics_array_size = int.from_bytes(topics_array_length, byteorder="big") - 1
         topic_index = topics_array_index + 1
 
         for _ in range(topics_array_size):
             topics_response, topics_next_index = await self.produce_topic_response(client_request, topic_index, topics)
-            topics_resp_array += topics_response
+            topics_resp_list.append(topics_response)
             topic_index = topics_next_index
 
         tag_buffer = int(0).to_bytes(1, byteorder="big")
         throttle_time = int(0).to_bytes(4, byteorder="big")
 
-        resp_body = tag_buffer + topics_resp_array + throttle_time + tag_buffer
+        resp_body = tag_buffer + b"".join(topics_resp_list) + throttle_time + tag_buffer
         return resp_body
 
     async def produce_partition_response(
@@ -412,7 +412,7 @@ class RequestHandler:
 
         partition_array_index = topic_index + topic_name_size
         partitions_array_length = client_request[partition_array_index : partition_array_index + 1]
-        partitions_resp_array = partitions_array_length
+        partitions_resp_list = [partitions_array_length]
         partitions_array_size = int.from_bytes(partitions_array_length, byteorder="big") - 1
         partition_id_index = partition_array_index + 1
 
@@ -423,13 +423,13 @@ class RequestHandler:
                 topic_name,
                 topics
             )
-            partitions_resp_array += partition_resp
+            partitions_resp_list.append(partition_resp)
             partition_id_index = next_partition_id_index
 
         topics_resp = (
                 topic_name_size.to_bytes(1, byteorder="big")
                 + topic_name.encode("utf-8")
-                + partitions_resp_array
+                + b"".join(partitions_resp_list)
                 + tag_buffer
         )
 
@@ -453,7 +453,7 @@ class RequestHandler:
         tag_buffer = int(0).to_bytes(1, byteorder="big")
         is_internal = int(0).to_bytes(1, byteorder="big")
         topic_authorized_operations = int(0).to_bytes(4, byteorder="big")
-        partition_data = b""
+        partition_data_list: list = []
 
         if request_topic not in topics:
             resp_topic_id = int(0).to_bytes(16, byteorder="big")
@@ -479,7 +479,7 @@ class RequestHandler:
                 replica_nodes = partition["num_replicas"].to_bytes(4, byteorder="big")
                 isr_nodes = partition["num_isr"].to_bytes(4, byteorder="big")
 
-                partition_data += (
+                partition_data_list.append(
                         resp_topic_error_code
                         + partition_index
                         + leader_id
@@ -494,7 +494,7 @@ class RequestHandler:
                         + tag_buffer
                 )
 
-            partition_array = partition_array_size + partition_data
+            partition_array = partition_array_size + b"".join(partition_data_list)
 
         resp_topic_name = request_topic.encode("utf-8")
         resp_topic_name_length = int(len(resp_topic_name) + 1).to_bytes(1, byteorder="big")

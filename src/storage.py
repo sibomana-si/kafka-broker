@@ -12,7 +12,7 @@ class Storage:
     def __init__(self, log_dir: str, log_file_name: str):
         self.log_dir = log_dir
         self.log_file_name = log_file_name
-        self.buffers: dict = {}
+        self.buffers: dict[tuple[str, int], bytearray] = {}
         self.buffer_lock = asyncio.Lock()
 
     async def load_metadata(self) -> dict[str, dict[str, Any]]:
@@ -60,7 +60,7 @@ class Storage:
 
         buffer_key = (topic_name, partition_index)
         async with self.buffer_lock:
-            buffer_data = self.buffers.get(buffer_key, b"")
+            buffer_data = bytes(self.buffers.get(buffer_key, bytearray()))
 
         return disk_data + buffer_data
 
@@ -81,8 +81,8 @@ class Storage:
         buffer_key = (topic_name, partition_index)
         async with self.buffer_lock:
             if buffer_key not in self.buffers:
-                self.buffers[buffer_key] = b""
-            self.buffers[buffer_key] += data
+                self.buffers[buffer_key] = bytearray()
+            self.buffers[buffer_key].extend(data)
 
     async def flush_buffers(self) -> None:
         """
@@ -101,7 +101,7 @@ class Storage:
                 log_dir = f"{self.log_dir}/{topic_name}-{partition_index}"
                 await asyncio.to_thread(os.makedirs, log_dir, exist_ok=True)
                 log_file = f"{log_dir}/{self.log_file_name}"
-                await self._append_file(log_file, data)
+                await self._append_file(log_file, bytes(data))
             self.buffers.clear()
 
     async def _read_file(self, file_path: str) -> bytes:
