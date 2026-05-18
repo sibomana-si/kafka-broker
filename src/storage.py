@@ -95,14 +95,18 @@ class Storage:
         """
 
         async with self.buffer_lock:
-            for (topic_name, partition_index), data in self.buffers.items():
+            if not self.buffers:
+                return
+            buffers_to_flush = self.buffers
+            self.buffers = {}
+
+            for (topic_name, partition_index), data in buffers_to_flush.items():
                 if not data:
                     continue
                 log_dir = f"{self.log_dir}/{topic_name}-{partition_index}"
                 await asyncio.to_thread(os.makedirs, log_dir, exist_ok=True)
                 log_file = f"{log_dir}/{self.log_file_name}"
                 await self._append_file(log_file, bytes(data))
-            self.buffers.clear()
 
     def _parse_cluster_metadata(self, cluster_metadata: bytes) -> dict:
         """
