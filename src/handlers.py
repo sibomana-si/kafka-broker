@@ -193,13 +193,30 @@ class RequestHandler:
         partitions_array_length = client_request[topics_array_index + 17 : topics_array_index + 18]
         partition_index = client_request[topics_array_index + 18 : topics_array_index + 22]
 
+        # Extract fetch_offset and partition_max_bytes from the request
+        current_idx = topics_array_index + 22
+        current_idx += 4  # current_leader_epoch
+        fetch_offset_bytes = client_request[current_idx : current_idx + 8]
+        fetch_offset = int.from_bytes(fetch_offset_bytes, byteorder="big")
+        current_idx += 8
+        current_idx += 4  # last_fetched_epoch
+        current_idx += 8  # log_start_offset
+        partition_max_bytes_bytes = client_request[current_idx : current_idx + 4]
+        partition_max_bytes = int.from_bytes(partition_max_bytes_bytes, byteorder="big")
+
+
         if topic_uuid in topics_by_uuid:
             topic_data = topics_by_uuid[topic_uuid]
             topic_name = topic_data["topic_name"]
 
             partition_error_code = ERROR_CODE_NONE
             partition_idx = int.from_bytes(partition_index, byteorder="big")
-            partition_records_array = await self.storage.read_partition_log(topic_name, partition_idx)
+            partition_records_array = await self.storage.read_partition_log(
+                topic_name,
+                partition_idx,
+                fetch_offset,
+                partition_max_bytes
+            )
 
             partition_records_array = encode_unsigned_varint(len(partition_records_array) + 1) + partition_records_array
 

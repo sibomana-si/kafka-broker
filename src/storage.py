@@ -37,16 +37,18 @@ class Storage:
                 logger.error(f"Failed to load metadata: {e}")
         return topics
 
-    async def read_partition_log(self, topic_name: str, partition_index: int) -> bytes:
+    async def read_partition_log(self, topic_name: str, partition_index: int, fetch_offset: int, max_bytes: int) -> bytes:
         """
-        Reads the content of a specific partition log file for a given topic.
+        Reads a chunk of the content of a specific partition log file for a given topic.
 
-        If the log file exists and is not empty, its contents will be returned as bytes.
-        Otherwise, an empty byte string is returned. This function facilitates the processing and
-        retrieval of partitioned log data for the provided topic and partition index.
+        It respects the maximum bytes requested. For simplicity, it currently seeks to
+        fetch_offset byte index (instead of record offset) and reads max_bytes.
+        It also combines the content from the disk and any in-memory buffer for that partition.
 
         :param topic_name: Name of the topic associated with the log file.
         :param partition_index: Index of the partition corresponding to the log file.
+        :param fetch_offset: The offset to start reading from.
+        :param max_bytes: The maximum number of bytes to return.
         :return: Content of the partition log file as bytes if it exists and is non-empty;
                  otherwise, an empty byte string.
         """
@@ -62,7 +64,24 @@ class Storage:
         async with self.buffer_lock:
             buffer_data = bytes(self.buffers.get(buffer_key, bytearray()))
 
-        return disk_data + buffer_data
+        # For the memory buffer, we also need to respect offset and max_bytes.
+        # fetch_offset refers to disk bytes. Since the buffer represents newly appended bytes,
+        # we adjust the offset relative to the current file size.
+
+        file_size = await asyncio.to_thread(lambda: path.stat().st_size if path.is_file() else 0)
+
+        if fetch_offset >= file_size:
+            # If the fetch offset is beyond the disk file, we only read from the buffer.
+            buffer_offset = fetch_offset - file_size
+            buffer_data = buffer_data[buffer_offset:buffer_offset + max_bytes]
+            return buffer_data
+        else:
+            # We got some data from disk, so limit how much we take from buffer
+            remaining_bytes = max_bytes - len(disk_data)
+            if remaining_bytes > 0:
+                return disk_data + buffer_data[:remaining_bytes]
+            else:
+                return disk_data
 
     async def write_partition_log(self, topic_name: str, partition_index: int, data: bytes) -> None:
         """
