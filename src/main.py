@@ -55,26 +55,59 @@ async def client_handler(
     try:
         while not shutdown_event.is_set():
             try:
-                read_task = asyncio.create_task(reader.read(1024))
+                # Read exactly 4 bytes for the message size
+                size_task = asyncio.create_task(reader.readexactly(4))
 
                 done, pending = await asyncio.wait(
-                    [read_task, shutdown_task],
+                    [size_task, shutdown_task],
                     timeout=CLIENT_READ_TIMEOUT,
                     return_when=asyncio.FIRST_COMPLETED
                 )
 
                 if shutdown_task in done:
                     logger.info(f"Shutdown event received, closing connection to {client_address}")
-                    read_task.cancel()
+                    size_task.cancel()
                     break
 
                 if not done:
                     # Timeout occurred
-                    read_task.cancel()
+                    size_task.cancel()
                     logger.warning(f"Client read timeout: {client_address}")
                     break
 
-                client_request: bytes = read_task.result()
+                try:
+                    size_bytes = size_task.result()
+                except asyncio.IncompleteReadError:
+                    break
+
+                msg_size = int.from_bytes(size_bytes, byteorder="big")
+
+                # Read exactly msg_size bytes for the payload
+                payload_task = asyncio.create_task(reader.readexactly(msg_size))
+
+                done, pending = await asyncio.wait(
+                    [payload_task, shutdown_task],
+                    timeout=CLIENT_READ_TIMEOUT,
+                    return_when=asyncio.FIRST_COMPLETED
+                )
+
+                if shutdown_task in done:
+                    logger.info(f"Shutdown event received, closing connection to {client_address}")
+                    payload_task.cancel()
+                    break
+
+                if not done:
+                    # Timeout occurred
+                    payload_task.cancel()
+                    logger.warning(f"Client payload read timeout: {client_address}")
+                    break
+
+                try:
+                    payload_bytes = payload_task.result()
+                except asyncio.IncompleteReadError:
+                    break
+
+                client_request: bytes = size_bytes + payload_bytes
 
             except asyncio.CancelledError:
                 break
@@ -99,8 +132,8 @@ async def client_handler(
             else:
                 logger.error(f"Unsupported API: {request_api_key}|{client_request.hex()}")
 
-            msg_size = len(correlation_id) + len(resp_body)
-            resp_msg_size = int(msg_size).to_bytes(4, byteorder="big")
+            msg_size_out = len(correlation_id) + len(resp_body)
+            resp_msg_size = int(msg_size_out).to_bytes(4, byteorder="big")
             resp = resp_msg_size + correlation_id + resp_body
 
             for attempt in range(MAX_WRITE_RETRIES):
