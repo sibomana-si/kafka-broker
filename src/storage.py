@@ -57,8 +57,17 @@ class Storage:
         path = Path(log_file)
         disk_data = b""
 
-        if await asyncio.to_thread(lambda: path.is_file() and path.stat().st_size > 0):
-            disk_data = await self._read_file(log_file)
+        def _read_chunk():
+            if path.is_file() and path.stat().st_size > 0:
+                with open(log_file, "rb") as f:
+                    f.seek(fetch_offset)
+                    return f.read(max_bytes)
+            return b""
+
+        try:
+            disk_data = await asyncio.to_thread(_read_chunk)
+        except Exception as e:
+            logger.error(f"Failed to read from disk partition log {log_file}: {e}")
 
         buffer_key = (topic_name, partition_index)
         async with self.buffer_lock:
@@ -119,13 +128,33 @@ class Storage:
             buffers_to_flush = self.buffers
             self.buffers = {}
 
-            for (topic_name, partition_index), data in buffers_to_flush.items():
-                if not data:
-                    continue
-                log_dir = f"{self.log_dir}/{topic_name}-{partition_index}"
+        failed_buffers = {}
+
+        for (topic_name, partition_index), data in buffers_to_flush.items():
+            if not data:
+                continue
+            log_dir = f"{self.log_dir}/{topic_name}-{partition_index}"
+            log_file = f"{log_dir}/{self.log_file_name}"
+            try:
                 await asyncio.to_thread(os.makedirs, log_dir, exist_ok=True)
-                log_file = f"{log_dir}/{self.log_file_name}"
                 await self._append_file(log_file, bytes(data))
+            except Exception as e:
+                logger.error(f"Failed to flush buffer to disk for {topic_name}-{partition_index}: {e}")
+                # We couldn't flush this buffer, so we need to add it back to the failed buffers
+                # to retry later and avoid data loss.
+                failed_buffers[(topic_name, partition_index)] = data
+
+        if failed_buffers:
+            async with self.buffer_lock:
+                for key, data in failed_buffers.items():
+                    if key not in self.buffers:
+                        self.buffers[key] = bytearray()
+                    # Prepend the failed data so it gets flushed first next time
+                    # We create a new bytearray to ensure correct ordering: [failed data] + [new data]
+                    new_buffer = bytearray(data)
+                    new_buffer.extend(self.buffers[key])
+                    self.buffers[key] = new_buffer
+
 
     def _parse_cluster_metadata(self, cluster_metadata: bytes) -> dict:
         """
@@ -192,6 +221,8 @@ class Storage:
         def _write():
             with open(file_path, "wb") as f:
                 f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
         await asyncio.to_thread(_write)
 
     @staticmethod
@@ -202,6 +233,7 @@ class Storage:
         This function opens the specified file in binary append mode ('ab') and writes
         the provided binary data to the file. It performs the file I/O operation in a
         separate thread, ensuring non-blocking behavior in async applications.
+        Also calls fsync to guarantee crash durability.
 
         :param file_path: The path of the file to which the data will be appended.
         :param data: The binary data to append to the file.
@@ -211,6 +243,8 @@ class Storage:
         def _append():
             with open(file_path, "ab") as f:
                 f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
         await asyncio.to_thread(_append)
 
     @staticmethod
