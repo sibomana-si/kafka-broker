@@ -1,7 +1,17 @@
+import logging
 from typing import Any
-from utils import encode_unsigned_varint, varint_encoding_size
-from storage import Storage
+#from utils import encode_unsigned_varint, varint_encoding_size
+from src.storage import Storage
+from src.protocol.reader import BufferReader
+from src.protocol.writer import BufferWriter
+from src.protocol.parser import (
+    parse_request_header,
+    parse_describe_topic_partitions_request,
+    parse_fetch_request,
+    parse_produce_request
+)
 
+logger = logging.getLogger(__name__)
 
 TAG_BUFFER = b'\x00'
 THROTTLE_TIME = b'\x00\x00\x00\x00'
@@ -24,9 +34,10 @@ class RequestHandler:
                 supported API key information.
         """
 
-        request_api_version = int.from_bytes(client_request[6:8], byteorder="big")
+        reader = BufferReader(client_request, 4) # Skip message length
+        header = parse_request_header(reader)
 
-        if request_api_version in (0, 1, 2, 3, 4):
+        if header.api_version in (0, 1, 2, 3, 4):
             api_key_array_length = int(5).to_bytes(1, byteorder="big")
             api_key_min = int(0).to_bytes(2, byteorder="big")
 
@@ -87,57 +98,80 @@ class RequestHandler:
             details for each topic.
         :return: A bytes object representing the response body, constructed according to the input
             request and the topic details.
-
-        :raises KeyError: Raised if a requested topic is not present in the provided topics dictionary.
         """
 
-        client_id_length = int.from_bytes(client_request[12:14], byteorder="big")
+        reader = BufferReader(client_request, 4) # Skip message length
+        header = parse_request_header(reader)
+        request = parse_describe_topic_partitions_request(reader)
 
-        field_sizes = {
-            "message": 4,
-            "api_key": 2,
-            "api_version": 2,
-            "correlation_id": 4,
-            "client_id": 2,
-            "tag_buffer": 1,
-            "topics_array": 1,
-            "topic_name": 1
-        }
+        writer = BufferWriter()
+        writer.write_tag_buffer()
+        writer.write_int32(0) # THROTTLE_TIME
+        writer.write_compact_array_length(len(request.topics))
 
-        next_cursor = int(255).to_bytes(1, byteorder="big")
+        request_topics = [t.name for t in request.topics]
+        request_topics.sort()
 
-        topic_array_index = (
-                field_sizes["message"]
-                + field_sizes["api_key"]
-                + field_sizes["api_version"]
-                + field_sizes["correlation_id"]
-                + field_sizes["client_id"]
-                + client_id_length
-                + field_sizes["tag_buffer"]
-        )
+        for topic_name in request_topics:
+            self.write_response_topic_data(writer, topic_name, topics)
 
-        topics_array_length = client_request[topic_array_index : topic_array_index + 1]
+        writer.write_int8(255) # next_cursor
+        writer.write_tag_buffer()
 
-        request_topics = []
-        topic_index = topic_array_index + 1
+        return writer.get_bytes()
 
-        for _ in range(int.from_bytes(topics_array_length, byteorder="big") - 1):
-            topic_name_length = int.from_bytes(client_request[topic_index : topic_index + 1], byteorder="big")
-            topic_name = client_request[topic_index + 1 : topic_index + topic_name_length].decode("utf-8")
-            request_topics.append(topic_name)
-            topic_index += topic_name_length + 1
+    def write_response_topic_data(self, writer: BufferWriter, request_topic: str, topics: dict[str, dict[str, Any]]) -> None:
+        """
+        Writes topic response data to the provided writer based on the requested topic and available topic metadata.
 
-        resp_topics_list = [topics_array_length]
+        The method examines the request_topic to determine if it is present within the topics metadata. If the topic is
+        not found, it writes error details for the unknown topic. If the topic is found, it writes metadata about the
+        requested topic, including details about its associated partitions.
 
-        for request_topic in sorted(request_topics):
-            resp_topic_data = self.get_response_topic_data(request_topic, topics)
-            resp_topics_list.append(resp_topic_data)
+        :param writer: A BufferWriter instance used for writing the response data in the appropriate format.
+        :param request_topic: The name of the topic being requested.
+        :param topics: A dictionary containing metadata of topics. Each key is a topic name mapping to a dictionary,
+            which includes the UUID of the topic and partition details.
 
-        resp_body = TAG_BUFFER + THROTTLE_TIME + b"".join(resp_topics_list) + next_cursor + TAG_BUFFER
+        :return: None
+        """
 
-        return resp_body
+        if request_topic not in topics:
+            writer.write_bytes(ERROR_CODE_UNKNOWN_TOPIC_OR_PARTITION)
+            writer.write_compact_string(request_topic)
+            writer.write_uuid(int(0).to_bytes(16, byteorder="big"))
+            writer.write_int8(0)  # is_internal
+            writer.write_compact_array_length(0)  # partitions
+            writer.write_int32(0)  # topic_authorized_operations
+            writer.write_tag_buffer()
+        else:
+            resp_topic_details = topics[request_topic]
+            writer.write_bytes(ERROR_CODE_NONE)
+            writer.write_compact_string(request_topic)
+            writer.write_uuid(resp_topic_details["topic_uuid"].bytes)
+            writer.write_int8(0)
 
-    async def handle_fetch_requests(self, client_request: bytes,  topics_by_uuid: dict[bytes, dict[str, Any]]) -> bytes:
+            partitions = resp_topic_details["partitions"].values()
+            writer.write_compact_array_length(len(partitions))
+
+            for partition in partitions:
+                writer.write_bytes(ERROR_CODE_NONE)
+                writer.write_int32(partition["partition_index"])
+                writer.write_int32(partition["leader_id"])
+                writer.write_int32(partition["leader_epoch"])
+                writer.write_int32(partition["num_replicas"])
+                writer.write_int8(1)  # broker
+                writer.write_int32(partition["num_isr"])
+                writer.write_int8(1)  # broker
+                writer.write_int8(1)  # elr
+                writer.write_int8(1)  # last_elr
+                writer.write_int8(1)  # offline_replicas
+                writer.write_tag_buffer()
+
+            writer.write_int32(0)  # topic_authorized_operations
+            writer.write_tag_buffer()
+
+    async def handle_fetch_requests(self, client_request: bytes, topics_by_uuid: dict[bytes, dict[str, Any]]) -> bytes:
         """
         Handles incoming fetch requests and generates the corresponding response.
 
@@ -154,114 +188,73 @@ class RequestHandler:
                  error message if the request could not be fulfilled.
         """
 
-        client_id_length = int.from_bytes(client_request[12:14], byteorder="big")
+        reader = BufferReader(client_request, 4) # Skip message length
+        header = parse_request_header(reader)
+        request = parse_fetch_request(reader)
 
-        field_sizes = {
-            "message": 4,
-            "api_key": 2,
-            "api_version": 2,
-            "correlation_id": 4,
-            "client_id": 2,
-            "tag_buffer": 1,
-            "max_wait_ms": 4,
-            "min_bytes": 4,
-            "max_bytes": 4,
-            "isolation_level": 1,
-            "session_id": 4,
-            "session_epoch": 4
-        }
+        writer = BufferWriter()
+        writer.write_tag_buffer()
+        writer.write_int32(0) # THROTTLE TIME
+        writer.write_bytes(ERROR_CODE_NONE)
+        writer.write_int32(request.session_id)
 
-        session_id_index = (
-                field_sizes["message"]
-                + field_sizes["api_key"]
-                + field_sizes["api_version"]
-                + field_sizes["correlation_id"]
-                + field_sizes["client_id"]
-                + client_id_length
-                + field_sizes["tag_buffer"]
-                + field_sizes["max_wait_ms"]
-                + field_sizes["min_bytes"]
-                + field_sizes["max_bytes"]
-                + field_sizes["isolation_level"]
-        )
+        writer.write_compact_array_length(len(request.topics))
 
-        topics_array_index =  session_id_index + field_sizes["session_id"] + field_sizes["session_epoch"]
+        if len(request.topics) == 0:
+            writer.write_tag_buffer()
 
-        session_id = client_request[session_id_index : session_id_index + 4]
-        topics_array_length = client_request[topics_array_index : topics_array_index + 1]
-        topic_uuid = client_request[topics_array_index + 1 : topics_array_index + 17]
-        partitions_array_length = client_request[topics_array_index + 17 : topics_array_index + 18]
-        partition_index = client_request[topics_array_index + 18 : topics_array_index + 22]
+        for topic in request.topics:
+            writer.write_uuid(topic.topic_id)
+            writer.write_compact_array_length(len(topic.partitions))
 
-        # Extract fetch_offset and partition_max_bytes from the request
-        current_idx = topics_array_index + 22
-        current_idx += 4  # current_leader_epoch
-        fetch_offset_bytes = client_request[current_idx : current_idx + 8]
-        fetch_offset = int.from_bytes(fetch_offset_bytes, byteorder="big")
-        current_idx += 8
-        current_idx += 4  # last_fetched_epoch
-        current_idx += 8  # log_start_offset
-        partition_max_bytes_bytes = client_request[current_idx : current_idx + 4]
-        partition_max_bytes = int.from_bytes(partition_max_bytes_bytes, byteorder="big")
+            if topic.topic_id in topics_by_uuid:
+                topic_data = topics_by_uuid[topic.topic_id]
+                topic_name = topic_data["topic_name"]
 
+                for partition in topic.partitions:
+                    partition_records_array = await self.storage.read_partition_log(
+                        topic_name, partition.partition_index, partition.fetch_offset, partition.partition_max_bytes
+                    )
 
-        if topic_uuid in topics_by_uuid:
-            topic_data = topics_by_uuid[topic_uuid]
-            topic_name = topic_data["topic_name"]
+                    writer.write_int32(partition.partition_index)
+                    writer.write_bytes(ERROR_CODE_NONE)
+                    writer.write_int64(0) # high_watermark
+                    writer.write_int64(0) # last_stable_offset
+                    writer.write_int64(0) # log_start_offset
+                    writer.write_int8(1) # aborted_transactions length
+                    writer.write_int32(0) # preferred_read_replica
 
-            partition_error_code = ERROR_CODE_NONE
-            partition_idx = int.from_bytes(partition_index, byteorder="big")
-            partition_records_array = await self.storage.read_partition_log(
-                topic_name,
-                partition_idx,
-                fetch_offset,
-                partition_max_bytes
-            )
+                    # records array (compact length)
+                    writer.write_unsigned_varint(len(partition_records_array) + 1)
+                    writer.write_bytes(partition_records_array)
 
-            partition_records_array = encode_unsigned_varint(len(partition_records_array) + 1) + partition_records_array
+                    writer.write_int8(0) # diverging_epoch
+                    writer.write_int8(0) # current_leader
+                    writer.write_int8(0) # snapshot_id
+                    writer.write_tag_buffer()
+            else:
+                for partition in topic.partitions:
+                    writer.write_int32(partition.partition_index)
+                    writer.write_bytes(ERROR_CODE_UNKNOWN_TOPIC_ID)
+                    writer.write_int64(0)
+                    writer.write_int64(0)
+                    writer.write_int64(0)
+                    writer.write_int8(1)
+                    writer.write_int32(0)
 
-        else:
-            partition_error_code = ERROR_CODE_UNKNOWN_TOPIC_ID
-            partition_records_array = int(0).to_bytes(1, byteorder="big")
+                    writer.write_unsigned_varint(0) # empty records array
 
-        partition_high_watermark = int(0).to_bytes(8, byteorder="big")
-        partitions_last_stable_offset = int(0).to_bytes(8, byteorder="big")
-        partition_log_start_offset = int(0).to_bytes(8, byteorder="big")
-        partition_aborted_transactions = int(1).to_bytes(1, byteorder="big")
-        partition_preferred_read_replica = int(0).to_bytes(4, byteorder="big")
-        partition_diverging_epoch_array = int(0).to_bytes(1, byteorder="big")
-        partition_current_leader_array = int(0).to_bytes(1, byteorder="big")
-        partition_snapshot_id_array = int(0).to_bytes(1, byteorder="big")
+                    writer.write_int8(0)
+                    writer.write_int8(0)
+                    writer.write_int8(0)
+                    writer.write_tag_buffer()
 
-        partitions_array = (
-                partitions_array_length
-                + partition_index
-                + partition_error_code
-                + partition_high_watermark
-                + partitions_last_stable_offset
-                + partition_log_start_offset
-                + partition_aborted_transactions
-                + partition_preferred_read_replica
-                + partition_records_array
-                + partition_diverging_epoch_array
-                + partition_current_leader_array
-                + partition_snapshot_id_array
-                + TAG_BUFFER
-        )
-        topics_array = topics_array_length + topic_uuid + partitions_array + TAG_BUFFER
-        node_endpoints_array = int(1).to_bytes(1, byteorder="big")
+            writer.write_tag_buffer()
 
-        resp_body = (
-                TAG_BUFFER
-                + THROTTLE_TIME
-                + ERROR_CODE_NONE
-                + session_id
-                + topics_array
-                + node_endpoints_array
-                + TAG_BUFFER
-        )
+        writer.write_int8(1) # node_endpoints_array
+        writer.write_tag_buffer() # tag buffer for fetch response
 
-        return resp_body
+        return writer.get_bytes()
 
     async def handle_produce_requests(self, client_request: bytes, topics: dict[str, dict]) -> bytes:
         """
@@ -275,243 +268,48 @@ class RequestHandler:
             request.
         """
 
-        client_id_length = int.from_bytes(client_request[12:14], byteorder="big")
+        reader = BufferReader(client_request, 4)
+        header = parse_request_header(reader)
+        request = parse_produce_request(reader)
 
-        field_sizes = {
-            "message": 4,
-            "api_key": 2,
-            "api_version": 2,
-            "correlation_id": 4,
-            "client_id": 2,
-            "tag_buffer": 1,
-            "transactional_id": 1,
-            "required_acks": 2,
-            "timeout": 4
-        }
+        writer = BufferWriter()
+        writer.write_tag_buffer()
+        writer.write_compact_array_length(len(request.topics))
 
-        topics_array_index = (
-                field_sizes["message"]
-                + field_sizes["api_key"]
-                + field_sizes["api_version"]
-                + field_sizes["correlation_id"]
-                + field_sizes["client_id"]
-                + client_id_length
-                + field_sizes["tag_buffer"]
-                + field_sizes["transactional_id"]
-                + field_sizes["required_acks"]
-                + field_sizes["timeout"]
-        )
+        for topic in request.topics:
+            writer.write_compact_string(topic.name)
+            writer.write_compact_array_length(len(topic.partitions))
 
-        topics_array_length = client_request[topics_array_index : topics_array_index + 1]
-        topics_resp_list = [topics_array_length]
-        topics_array_size = int.from_bytes(topics_array_length, byteorder="big") - 1
-        topic_index = topics_array_index + 1
+            for partition in topic.partitions:
+                valid_topic_and_partition = False
+                if topic.name in topics:
+                    if partition.partition_index in topics[topic.name]["partitions"]:
+                        valid_topic_and_partition = True
 
-        for _ in range(topics_array_size):
-            topics_response, topics_next_index = await self.produce_topic_response(client_request, topic_index, topics)
-            topics_resp_list.append(topics_response)
-            topic_index = topics_next_index
+                writer.write_int32(partition.partition_index)
 
-        resp_body = TAG_BUFFER + b"".join(topics_resp_list) + THROTTLE_TIME + TAG_BUFFER
-        return resp_body
+                if valid_topic_and_partition:
+                    writer.write_bytes(ERROR_CODE_NONE)
+                    writer.write_int64(0) # base_offset
+                    writer.write_int64(-1) # log_append_time
+                    writer.write_int64(0) # log_start_offset
+                    await self.storage.write_partition_log(
+                        topic.name, partition.partition_index, partition.record_batch
+                    )
+                else:
+                    writer.write_bytes(ERROR_CODE_UNKNOWN_TOPIC_OR_PARTITION)
+                    writer.write_int64(-1) # base_offset
+                    writer.write_int64(-1) # log_append_time
+                    writer.write_int64(-1) # log_start_offset
 
-    async def produce_partition_response(
-            self,
-            client_request: bytes,
-            partition_id_index: int,
-            topic_name: str,
-            topics: dict
-    ) -> tuple[bytes, int]:
-        """
-        Generate a partition response for a produce request and return the response alongside the next index.
+                writer.write_int8(1)  # record errors array
+                writer.write_int8(0)  # error message
+                writer.write_tag_buffer()  # partition tag buffer
 
-        This method processes a produce request for a specific topic and partition, extracts the relevant
-        record batch, validates the topic and partition, and generates the corresponding partition response.
-        It also determines the next index in the client request for further processing.
+            writer.write_tag_buffer()  # topic tag buffer
 
-        :param client_request: The raw request data received from the client as a byte sequence.
-        :param partition_id_index: The index within the raw data where the partition ID starts.
-        :param topic_name: The name of the topic to which the produce request is targeted.
-        :param topics: A dictionary containing metadata about topics and their partitions. The metadata
-                       includes partition indices and other necessary information for validation.
-        :return: A tuple containing:
-                 - The partition response as a byte sequence.
-                 - The next index in the client request as an integer.
-        """
+        writer.write_int32(0) # throttle time
+        writer.write_tag_buffer()  # tag buffer for produce response
 
-        partition_id_size_length = 4
-        partition_index = client_request[partition_id_index : partition_id_index + partition_id_size_length]
+        return writer.get_bytes()
 
-        record_batch_array_index = partition_id_index + partition_id_size_length
-        record_batch_size_length = varint_encoding_size(client_request, record_batch_array_index + 1)
-        record_batch_size = int.from_bytes(
-            client_request[record_batch_array_index : record_batch_array_index + record_batch_size_length],
-            byteorder="big"
-        )
-        record_batch_index = record_batch_array_index + record_batch_size_length
-        record_batch = client_request[record_batch_index : record_batch_index + record_batch_size]
-
-        valid_topic_and_partition = False
-
-        if topic_name in topics:
-            partition_idx = int.from_bytes(partition_index, byteorder="big")
-            if partition_idx in topics[topic_name]["partitions"]:
-                valid_topic_and_partition = True
-
-        if valid_topic_and_partition:
-            error_code = ERROR_CODE_NONE
-            base_offset = int(0).to_bytes(8, byteorder="big")
-            log_start_offset = int(0).to_bytes(8, byteorder="big")
-            partition_idx = int.from_bytes(partition_index, byteorder="big")
-            await self.storage.write_partition_log(topic_name, partition_idx, record_batch)
-        else:
-            error_code = ERROR_CODE_UNKNOWN_TOPIC_OR_PARTITION
-            base_offset = int(-1).to_bytes(8, byteorder="big", signed=True)
-            log_start_offset = int(-1).to_bytes(8, byteorder="big", signed=True)
-
-        log_append_time = int(-1).to_bytes(8, byteorder="big", signed=True)
-        records_array = int(1).to_bytes(1, byteorder="big")
-        error_message = int(0).to_bytes(1, byteorder="big")
-
-        partition_resp = (
-                partition_index
-                + error_code
-                + base_offset
-                + log_append_time
-                + log_start_offset
-                + records_array
-                + error_message
-                + TAG_BUFFER
-        )
-
-        next_index = (
-                partition_id_index
-                + partition_id_size_length
-                + record_batch_size_length
-                + record_batch_size
-        )
-
-        return partition_resp, next_index
-
-    async def produce_topic_response(
-            self,
-            client_request: bytes,
-            topic_index: int,
-            topics: dict
-    ) -> tuple[bytes, int]:
-        """
-        Generates a response for a specific Kafka topic by parsing the client request and processing each partition
-        within the topic.
-
-        The function creates a properly formatted response with topic details and corresponding partition responses.
-
-        :param client_request: The binary data received from the Kafka client containing metadata for topic parsing.
-        :param topic_index: The starting index in the client request where the topic metadata begins.
-        :param topics: A dictionary of available topics mapped to their configurations, used for validation and
-                       processing partitions.
-        :return: A tuple containing the topic response as bytes and the updated index in the client request after
-                 processing the topic.
-        """
-
-        topic_name_size = int.from_bytes(client_request[topic_index : topic_index + 1], byteorder="big")
-        topic_name = client_request[topic_index + 1 : topic_index + topic_name_size].decode("utf-8")
-
-        partition_array_index = topic_index + topic_name_size
-        partitions_array_length = client_request[partition_array_index : partition_array_index + 1]
-        partitions_resp_list = [partitions_array_length]
-        partitions_array_size = int.from_bytes(partitions_array_length, byteorder="big") - 1
-        partition_id_index = partition_array_index + 1
-
-        for _ in range(partitions_array_size):
-            partition_resp, next_partition_id_index = await self.produce_partition_response(
-                client_request,
-                partition_id_index,
-                topic_name,
-                topics
-            )
-            partitions_resp_list.append(partition_resp)
-            partition_id_index = next_partition_id_index
-
-        topics_resp = (
-                topic_name_size.to_bytes(1, byteorder="big")
-                + topic_name.encode("utf-8")
-                + b"".join(partitions_resp_list)
-                + TAG_BUFFER
-        )
-
-        topics_next_index = partition_id_index + 1
-
-        return topics_resp, topics_next_index
-
-    def get_response_topic_data(self, request_topic: str, topics: dict[str, dict[str, Any]]) -> bytes:
-        """
-        Generates the response payload for a given request topic based on available topics metadata.
-
-        Constructs a byte-encoded representation of the topic's information, including its partitions,
-        leaders, replicas, and other associated data.
-
-        :param request_topic: The name of the topic being requested
-        :param topics: A mapping of topics to their detailed metadata, where each topic maps to a dictionary containing
-            its UUID and partition-related data.
-        :return: A byte-encoded representation of the response topic data, detailing the topic's metadata.
-        """
-
-        is_internal = int(0).to_bytes(1, byteorder="big")
-        topic_authorized_operations = int(0).to_bytes(4, byteorder="big")
-        partition_data_list: list = []
-
-        if request_topic not in topics:
-            resp_topic_id = int(0).to_bytes(16, byteorder="big")
-            resp_topic_error_code = ERROR_CODE_UNKNOWN_TOPIC_OR_PARTITION
-            partition_array_size = int(1).to_bytes(1, byteorder="big")
-            partition_array = partition_array_size
-        else:
-            resp_topic_details = topics[request_topic]
-            resp_topic_id = resp_topic_details["topic_uuid"].bytes
-            resp_topic_error_code = ERROR_CODE_NONE
-
-            broker = int(1).to_bytes(1, byteorder="big")
-            elr = int(1).to_bytes(1, byteorder="big")
-            last_elr = int(1).to_bytes(1, byteorder="big")
-            offline_replicas = int(1).to_bytes(1, byteorder="big")
-
-            partition_array_size = (len(resp_topic_details["partitions"]) + 1).to_bytes(1, byteorder="big")
-
-            for partition in resp_topic_details["partitions"].values():
-                partition_index = partition["partition_index"].to_bytes(4, byteorder="big")
-                leader_id = partition["leader_id"].to_bytes(4, byteorder="big")
-                leader_epoch = partition["leader_epoch"].to_bytes(4, byteorder="big")
-                replica_nodes = partition["num_replicas"].to_bytes(4, byteorder="big")
-                isr_nodes = partition["num_isr"].to_bytes(4, byteorder="big")
-
-                partition_data_list.append(
-                        resp_topic_error_code
-                        + partition_index
-                        + leader_id
-                        + leader_epoch
-                        + replica_nodes
-                        + broker
-                        + isr_nodes
-                        + broker
-                        + elr
-                        + last_elr
-                        + offline_replicas
-                        + TAG_BUFFER
-                )
-
-            partition_array = partition_array_size + b"".join(partition_data_list)
-
-        resp_topic_name = request_topic.encode("utf-8")
-        resp_topic_name_length = int(len(resp_topic_name) + 1).to_bytes(1, byteorder="big")
-        resp_topic_data = (
-                resp_topic_error_code
-                + resp_topic_name_length
-                + resp_topic_name
-                + resp_topic_id
-                + is_internal
-                + partition_array
-                + topic_authorized_operations
-                + TAG_BUFFER
-        )
-
-        return resp_topic_data
