@@ -1,14 +1,25 @@
 import asyncio
-import logging
 import signal
 from asyncio import StreamReader, StreamWriter, Server
 from typing import Any
+import structlog
 
-from storage import Storage
-from handlers import RequestHandler
+from src.storage import Storage
+from src.handlers import RequestHandler
 
-logging.basicConfig(level=logging.DEBUG)
-logger = logging.getLogger(__name__)
+# Configure structlog for JSON output
+structlog.configure(
+    processors=[
+        structlog.stdlib.add_log_level,
+        structlog.stdlib.add_logger_name,
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.JSONRenderer()
+    ],
+    context_class=dict,
+    logger_factory=structlog.stdlib.LoggerFactory()
+)
+
+logger = structlog.get_logger(__name__)
 
 PRODUCE_KEY = 0
 FETCH_KEY = 1
@@ -48,7 +59,8 @@ async def client_handler(
     """
 
     client_address: str = writer.get_extra_info("peername")
-    logger.info(f"Connection accepted from {client_address}")
+    log = logger.bind(client_address=client_address)
+    log.info("connection_accepted")
 
     shutdown_task = asyncio.create_task(shutdown_event.wait())
 
@@ -65,14 +77,14 @@ async def client_handler(
                 )
 
                 if shutdown_task in done:
-                    logger.info(f"Shutdown event received, closing connection to {client_address}")
+                    log.info("shutdown_event_received")
                     size_task.cancel()
                     break
 
                 if not done:
                     # Timeout occurred
                     size_task.cancel()
-                    logger.warning(f"Client read timeout: {client_address}")
+                    log.warning("client_read_timeout")
                     break
 
                 try:
@@ -92,14 +104,14 @@ async def client_handler(
                 )
 
                 if shutdown_task in done:
-                    logger.info(f"Shutdown event received, closing connection to {client_address}")
+                    log.info("shutdown_event_received")
                     payload_task.cancel()
                     break
 
                 if not done:
                     # Timeout occurred
                     payload_task.cancel()
-                    logger.warning(f"Client payload read timeout: {client_address}")
+                    log.warning("client_payload_read_timeout")
                     break
 
                 try:
@@ -112,7 +124,7 @@ async def client_handler(
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"Read error: {e}")
+                log.error("read_error", error=str(e), exc_info=True)
                 break
 
             if not client_request:
@@ -130,7 +142,7 @@ async def client_handler(
             elif request_api_key == PRODUCE_KEY:
                 resp_body = await handler.handle_produce_requests(client_request, topics)
             else:
-                logger.error(f"Unsupported API: {request_api_key}|{client_request.hex()}")
+                log.error("unsupported_api_key", api_key=request_api_key, request_hex=client_request.hex())
 
             msg_size_out = len(correlation_id) + len(resp_body)
             resp_msg_size = int(msg_size_out).to_bytes(4, byteorder="big")
@@ -142,22 +154,22 @@ async def client_handler(
                     await asyncio.wait_for(writer.drain(), timeout=CLIENT_WRITE_TIMEOUT)
                     break
                 except (asyncio.TimeoutError, ConnectionError) as e:
-                    logger.warning(f"Write attempt {attempt + 1} failed for {client_address}: {e}")
+                    log.warning("write_attempt_failed", attempt=attempt + 1, error=str(e))
                     if attempt == MAX_WRITE_RETRIES - 1:
-                        logger.error(f"Max write retries reached for {client_address}. Closing connection.")
+                        log.error("max_write_retries_reached")
                         return
 
     except Exception as e:
-        logger.exception(f"Error in client_handler: {client_address}|{e}")
+        log.exception("unhandled_error_in_client_handler", error=str(e))
     finally:
         shutdown_task.cancel()
         writer.close()
         try:
             await asyncio.wait_for(writer.wait_closed(), timeout=CLIENT_WRITE_TIMEOUT)
         except asyncio.TimeoutError:
-            logger.warning(f"Timeout while waiting for connection to close: {client_address}")
+            log.warning("timeout_waiting_for_connection_to_close")
         except Exception as e:
-            logger.warning(f"Error while waiting for connection to close: {client_address}|{e}")
+            log.warning("error_waiting_for_connection_to_close", error=str(e))
 
 
 async def flush_buffers_periodically(storage: Storage, shutdown_event: asyncio.Event) -> None:
@@ -177,7 +189,7 @@ async def flush_buffers_periodically(storage: Storage, shutdown_event: asyncio.E
 
     while not shutdown_event.is_set():
         await asyncio.sleep(BUFFER_FLUSH_INTERVAL)
-        logger.info("Flushing buffers to disk...")
+        logger.info("flushing_buffers_to_disk")
         await storage.flush_buffers()
 
 
@@ -198,7 +210,7 @@ async def main():
     active_connections = set()
 
     def signal_handler():
-        logger.info("Received termination signal. Initiating graceful shutdown...")
+        logger.info("received_termination_signal")
         shutdown_event.set()
 
     # Register signal handlers for graceful shutdown
@@ -225,7 +237,7 @@ async def main():
         port=host_port,
         reuse_port=True
     )
-    logger.info(f"Server started on {host_ip}:{host_port}")
+    logger.info("server_started", host=host_ip, port=host_port)
 
     # Start the background task for flushing buffers
     flush_task = asyncio.create_task(flush_buffers_periodically(storage, shutdown_event))
@@ -235,28 +247,28 @@ async def main():
             try:
                 await shutdown_event.wait()
             finally:
-                logger.info("Stopping server from accepting new connections.")
+                logger.info("stopping_server")
                 server.close()
                 await server.wait_closed()
 
                 if active_connections:
-                    logger.info(f"Waiting for {len(active_connections)} active connections to close...")
+                    logger.info("waiting_for_active_connections_to_close", count=len(active_connections))
                     done, pending = await asyncio.wait(active_connections, timeout=GRACEFUL_SHUTDOWN_TIMEOUT)
 
                     if pending:
-                        logger.warning(f"Forcefully cancelling {len(pending)} pending connections.")
+                        logger.warning("forcefully_cancelling_pending_connections", count=len(pending))
                         for task in pending:
                             task.cancel()
 
                 # Stop the flush task and do a final flush
-                logger.info("Stopping buffer flush task...")
+                logger.info("stopping_buffer_flush_task")
                 flush_task.cancel()
                 await asyncio.gather(flush_task, return_exceptions=True)
-                logger.info("Performing final buffer flush...")
+                logger.info("performing_final_buffer_flush")
                 await storage.flush_buffers()
 
     await serve()
-    logger.info("Server shutdown complete.")
+    logger.info("server_shutdown_complete")
 
 
 if __name__ == "__main__":

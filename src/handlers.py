@@ -1,4 +1,4 @@
-import logging
+import structlog
 from typing import Any
 from src.storage import Storage
 from src.protocol.reader import BufferReader
@@ -10,7 +10,7 @@ from src.protocol.parser import (
     parse_produce_request
 )
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 TAG_BUFFER = b'\x00'
 THROTTLE_TIME = b'\x00\x00\x00\x00'
@@ -103,6 +103,8 @@ class RequestHandler:
         header = parse_request_header(reader)
         request = parse_describe_topic_partitions_request(reader)
 
+        logger.info("describe_topic_partitions_request_received", topic_count=len(request.topics))
+
         writer = BufferWriter()
         writer.write_tag_buffer()
         writer.write_int32(0) # THROTTLE_TIME
@@ -191,6 +193,8 @@ class RequestHandler:
         header = parse_request_header(reader)
         request = parse_fetch_request(reader)
 
+        logger.info("fetch_request_received", topic_count=len(request.topics))
+
         writer = BufferWriter()
         writer.write_tag_buffer()
         writer.write_int32(0) # THROTTLE TIME
@@ -270,6 +274,8 @@ class RequestHandler:
         reader = BufferReader(client_request, 4)
         header = parse_request_header(reader)
         request = parse_produce_request(reader)
+
+        logger.info("produce_request_received", topic_count=len(request.topics))
 
         writer = BufferWriter()
         writer.write_tag_buffer()

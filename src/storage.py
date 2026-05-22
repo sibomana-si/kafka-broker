@@ -1,11 +1,11 @@
 import asyncio
-import logging
 import uuid
 import os
 from pathlib import Path
 from typing import Any
+import structlog
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 class Storage:
@@ -34,7 +34,7 @@ class Storage:
                 cluster_metadata = await self._read_file(cluster_metadata_file)
                 topics = await asyncio.to_thread(self._parse_cluster_metadata, cluster_metadata)
             except Exception as e:
-                logger.error(f"Failed to load metadata: {e}")
+                logger.error("failed_to_load_metadata", error=str(e), exc_info=True)
         return topics
 
     async def read_partition_log(self, topic_name: str, partition_index: int, fetch_offset: int, max_bytes: int) -> bytes:
@@ -67,7 +67,7 @@ class Storage:
         try:
             disk_data = await asyncio.to_thread(_read_chunk)
         except Exception as e:
-            logger.error(f"Failed to read from disk partition log {log_file}: {e}")
+            logger.error("failed_to_read_from_disk_partition_log", log_file=log_file, error=str(e), exc_info=True)
 
         buffer_key = (topic_name, partition_index)
         async with self.buffer_lock:
@@ -139,7 +139,13 @@ class Storage:
                 await asyncio.to_thread(os.makedirs, log_dir, exist_ok=True)
                 await self._append_file(log_file, bytes(data))
             except Exception as e:
-                logger.error(f"Failed to flush buffer to disk for {topic_name}-{partition_index}: {e}")
+                logger.error(
+                    "failed_to_flush_buffer_to_disk",
+                    topic_name=topic_name,
+                    partition_index=partition_index,
+                    error=str(e),
+                    exc_info=True
+                )
                 # We couldn't flush this buffer, so we need to add it back to the failed buffers
                 # to retry later and avoid data loss.
                 failed_buffers[(topic_name, partition_index)] = data
@@ -154,7 +160,6 @@ class Storage:
                     new_buffer = bytearray(data)
                     new_buffer.extend(self.buffers[key])
                     self.buffers[key] = new_buffer
-
 
     def _parse_cluster_metadata(self, cluster_metadata: bytes) -> dict:
         """
