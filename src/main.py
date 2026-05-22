@@ -1,8 +1,10 @@
 import asyncio
 import signal
+import time
 from asyncio import StreamReader, StreamWriter, Server
 from typing import Any
 import structlog
+from prometheus_client import start_http_server, Counter, Histogram, Gauge
 
 from src.storage import Storage
 from src.handlers import RequestHandler
@@ -33,6 +35,34 @@ MAX_WRITE_RETRIES = 3
 MAX_CONCURRENT_CONNECTIONS = 100
 GRACEFUL_SHUTDOWN_TIMEOUT = 10.0
 BUFFER_FLUSH_INTERVAL = 10 # Flush buffer every 10 seconds
+
+# Reverse lookup for metrics
+API_KEY_NAMES = {
+    PRODUCE_KEY: "produce",
+    FETCH_KEY: "fetch",
+    API_VERSIONS_KEY: "api_versions",
+    DESCRIBE_TOPIC_PARTITIONS_KEY: "describe_topic_partitions"
+}
+
+# Metrics Definitions
+REQUEST_COUNT = Counter(
+    'kafka_server_requests_total',
+    'Total requests',
+    ['api_key', 'status']
+)
+REQUEST_LATENCY = Histogram(
+    'kafka_server_request_duration_seconds',
+    'Request latency',
+    ['api_key']
+)
+ACTIVE_CONNECTIONS = Gauge(
+    'kafka_server_active_connections',
+    'Number of active client connections'
+)
+FLUSH_DURATION = Histogram(
+    'kafka_server_disk_flush_duration_seconds',
+    'Disk flush latency'
+)
 
 
 async def client_handler(
@@ -133,16 +163,28 @@ async def client_handler(
             correlation_id = client_request[8:12]
             resp_body = b""
 
-            if request_api_key == API_VERSIONS_KEY:
-                resp_body = await handler.handle_api_version_requests(client_request)
-            elif request_api_key == DESCRIBE_TOPIC_PARTITIONS_KEY:
-                resp_body = await handler.handle_describe_topic_partition_requests(client_request, topics)
-            elif request_api_key == FETCH_KEY:
-                resp_body = await handler.handle_fetch_requests(client_request, topics_by_uuid)
-            elif request_api_key == PRODUCE_KEY:
-                resp_body = await handler.handle_produce_requests(client_request, topics)
-            else:
-                log.error("unsupported_api_key", api_key=request_api_key, request_hex=client_request.hex())
+            api_name = API_KEY_NAMES.get(request_api_key, "unknown")
+            start_time = time.perf_counter()
+            status = "success"
+
+            try:
+                if request_api_key == API_VERSIONS_KEY:
+                    resp_body = await handler.handle_api_version_requests(client_request)
+                elif request_api_key == DESCRIBE_TOPIC_PARTITIONS_KEY:
+                    resp_body = await handler.handle_describe_topic_partition_requests(client_request, topics)
+                elif request_api_key == FETCH_KEY:
+                    resp_body = await handler.handle_fetch_requests(client_request, topics_by_uuid)
+                elif request_api_key == PRODUCE_KEY:
+                    resp_body = await handler.handle_produce_requests(client_request, topics)
+                else:
+                    log.error("unsupported_api_key", api_key=request_api_key, request_hex=client_request.hex())
+                    status = "error"
+            except Exception as e:
+                status = "error"
+                log.error("request_handling_error", api_key=request_api_key, error=str(e), exc_info=True)
+            finally:
+                REQUEST_COUNT.labels(api_key=api_name, status=status).inc()
+                REQUEST_LATENCY.labels(api_key=api_name).observe(time.perf_counter() - start_time)
 
             msg_size_out = len(correlation_id) + len(resp_body)
             resp_msg_size = int(msg_size_out).to_bytes(4, byteorder="big")
@@ -190,12 +232,21 @@ async def flush_buffers_periodically(storage: Storage, shutdown_event: asyncio.E
     while not shutdown_event.is_set():
         await asyncio.sleep(BUFFER_FLUSH_INTERVAL)
         logger.info("flushing_buffers_to_disk")
-        await storage.flush_buffers()
+        start_time = time.perf_counter()
+        try:
+            await storage.flush_buffers()
+        finally:
+            FLUSH_DURATION.observe(time.perf_counter() - start_time)
 
 
 async def main():
     host_ip = "localhost"
     host_port = 9092
+    metrics_port = 8000
+
+    # Start Prometheus metrics server
+    start_http_server(metrics_port)
+    logger.info("metrics_server_started", port=metrics_port)
     
     storage = Storage(LOG_FILES_DIR, LOG_FILE_NAME)
     handler = RequestHandler(storage)
@@ -220,6 +271,7 @@ async def main():
 
     async def handle_client(reader: StreamReader, writer: StreamWriter):
         await connection_semaphore.acquire()
+        ACTIVE_CONNECTIONS.inc()
 
         # Track the active connection task
         current_task = asyncio.current_task()
@@ -228,6 +280,7 @@ async def main():
         try:
             await client_handler(reader, writer, handler, topics, topics_by_uuid, shutdown_event)
         finally:
+            ACTIVE_CONNECTIONS.dec()
             active_connections.remove(current_task)
             connection_semaphore.release()
 
