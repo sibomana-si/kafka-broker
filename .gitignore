@@ -1,5 +1,4 @@
 .idea/
 mypy.ini
-tests/
 pytest.ini
 *__pycache__/
