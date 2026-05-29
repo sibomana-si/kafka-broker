@@ -1,162 +1,239 @@
-# kafka-broker
+# Kafka Broker
 
-A Python implementation of a Kafka broker built on `asyncio`, supporting the core Kafka wire protocol. Designed as a CodeCrafters learning project.
+A from-scratch implementation of an Apache Kafka broker in Python, built on `asyncio`. It speaks the Kafka binary wire protocol over TCP and implements a focused subset of the broker APIs end to end — from low-level byte (de)serialization, through metadata parsing of the KRaft `__cluster_metadata` log, to a buffered, crash-durable storage layer.
 
----
+## Project Overview
+
+This broker implements the Kafka wire protocol directly against raw TCP sockets, with no Kafka libraries in between. It handles four API keys:
+
+| API | Key | Purpose |
+| --- | --- | --- |
+| `ApiVersions` | 18 | Advertise supported APIs and version ranges to clients |
+| `DescribeTopicPartitions` | 75 | Return topic/partition metadata |
+| `Fetch` | 1 | Read records from a partition log |
+| `Produce` | 0 | Append records to a partition log |
+
+Cluster metadata (topics, partitions, replicas, leaders) is sourced from a KRaft-style `__cluster_metadata` log that is parsed at startup. Produced records are buffered in memory and periodically flushed to per-partition log files with `fsync` for durability, while reads transparently merge on-disk data with not-yet-flushed buffered data so consumers always see the latest writes.
+
+The project began as a [CodeCrafters](https://codecrafters.io/challenges/kafka) "Build Your Own Kafka" challenge and has been extended with production-minded concerns: graceful shutdown, backpressure, timeouts, structured logging, and Prometheus metrics.
 
 ## Features
 
-- **Kafka wire protocol** — implements the binary framing, compact encoding (unsigned varints), and the following APIs:
-  - `ApiVersions` (key 18)
-  - `DescribeTopicPartitions` (key 75)
-  - `Fetch` (key 1)
-  - `Produce` (key 0)
-- **KRaft metadata** — reads topic and partition configuration from the `__cluster_metadata` log file (no ZooKeeper dependency)
-- **Durable writes** — in-memory write buffer flushed to disk with `fsync` every 10 seconds and on shutdown
-- **Graceful shutdown** — drains active connections before exiting, with a final buffer flush to prevent data loss
-- **Observability** — structured JSON logging via `structlog` and Prometheus metrics on a dedicated port
+### Architectural design
 
----
+- **Layered architecture** with clear separation of concerns:
+  - **Transport layer** (`main.py`) — TCP accept loop, 4-byte length-prefix framing, correlation-ID handling, per-connection lifecycle.
+  - **Dispatch / application layer** (`handlers.py`) — one handler per API key; parses requests, calls storage, builds responses.
+  - **Protocol layer** (`protocol/`) — pure (de)serialization of Kafka primitives, isolated from business logic.
+  - **Storage layer** (`storage.py`) — metadata parsing, buffered writes, merged reads, background flushing.
+- **Typed request model** — raw bytes are parsed into `@dataclass` request objects (`messages.py`), so handlers work with structured data instead of byte offsets.
+- **Stateless parsers** — parsing functions take a cursor-based `BufferReader` and return dataclasses, making them easy to test and compose.
+- **Single source of configuration** — all tunables are module-level constants at the top of `main.py`.
+
+### Scalability patterns
+
+- **Fully non-blocking I/O** — the entire server runs on a single `asyncio` event loop; thousands of connections can be multiplexed without a thread per connection.
+- **Connection concurrency limit** — a `Semaphore` (`MAX_CONCURRENT_CONNECTIONS`) bounds the number of in-flight connections, providing admission control under load.
+- **Offloaded blocking work** — all filesystem I/O is dispatched via `asyncio.to_thread` so disk latency never stalls the event loop.
+- **O(1) Fetch lookups** — alongside the by-name topic index, a `topics_by_uuid` index is built once at startup so `Fetch` (which addresses topics by UUID) resolves in constant time.
+
+### Performance optimizations
+
+- **Write buffering / batching** — produced records accumulate in per-partition in-memory `bytearray` buffers and are flushed to disk in batches (every `BUFFER_FLUSH_INTERVAL` seconds), amortizing `open`/`fsync` cost across many writes.
+- **Bounded, chunked reads** — `read_partition_log` seeks to the requested offset and reads at most `max_bytes`, avoiding full-file loads.
+- **Read-through buffer merge** — reads combine on-disk bytes with the live write buffer, so a consumer never has to wait for a flush to observe a recent produce.
+- **Append-only `bytearray` response building** — `BufferWriter` accumulates into a single mutable buffer, avoiding repeated byte-string concatenation.
+
+### Reliability patterns
+
+- **Crash durability** — every flush writes, `flush()`es, and `fsync()`s the file descriptor so acknowledged data survives process/OS crashes.
+- **No-loss flush failure handling** — if a flush fails, the affected data is *prepended* back onto the partition buffer so ordering is preserved and it is retried on the next flush cycle.
+- **Graceful shutdown** — on `SIGINT`/`SIGTERM` the server stops accepting, waits up to `GRACEFUL_SHUTDOWN_TIMEOUT` for active connections to drain, force-cancels stragglers, stops the flush task, and performs a final buffer flush.
+- **Per-operation timeouts** — `CLIENT_READ_TIMEOUT` and `CLIENT_WRITE_TIMEOUT` guard against slow/stuck clients holding connections open.
+- **Bounded write retries** — failed socket writes are retried up to `MAX_WRITE_RETRIES` before the connection is abandoned.
+- **Input validation / hardening** — message sizes are validated against `MAX_REQUEST_SIZE`, negative read lengths are rejected, and incomplete reads are handled cleanly to defend against malformed or truncated frames.
+- **Fault isolation** — an exception while handling one request is logged and recorded as an error metric without tearing down the whole server.
+
+### Observability patterns
+
+- **Structured JSON logging** via `structlog` — every log line is machine-parseable and connection logs are bound with the client address for correlation.
+- **Prometheus metrics** exposed on a dedicated HTTP port (`8000`):
+  - `kafka_server_requests_total` — Counter, labels: `api_key`, `status`
+  - `kafka_server_request_duration_seconds` — Histogram, label: `api_key`
+  - `kafka_server_active_connections` — Gauge
+  - `kafka_server_disk_flush_duration_seconds` — Histogram
+- **Lifecycle event logging** — connection accept, shutdown signals, flushes, and timeouts are all logged as discrete events.
+
+## System Architecture
+
+### High-level system architecture
+
+```
+                         ┌──────────────────────────────────────────────┐
+                         │                  Kafka Broker                  │
+                         │                  (asyncio loop)                │
+   Kafka clients         │                                                │
+  ┌───────────┐  TCP     │   ┌────────────────┐      ┌────────────────┐  │
+  │ producer  │◀────────▶│   │  client_handler │      │  RequestHandler │  │
+  │ consumer  │  :9092   │   │  (framing +     │─────▶│  (dispatch by   │  │
+  │ admin     │          │   │   correlation)  │      │   api_key)      │  │
+  └───────────┘          │   └────────┬───────┘      └───────┬────────┘  │
+                         │            │ semaphore             │           │
+                         │            │ (admission)           ▼           │
+                         │            │              ┌────────────────┐   │
+                         │            │              │ protocol layer  │  │
+                         │            │              │ reader / writer │  │
+                         │            │              │ parser / msgs   │  │
+                         │            │              └───────┬────────┘   │
+                         │            │                      ▼            │
+                         │            │              ┌────────────────┐   │
+                         │            │              │    Storage      │  │
+                         │            │              │ buffers + locks │  │
+                         │            │              └───┬────────┬───┘   │
+                         │   ┌────────▼─────────┐        │        │       │
+                         │   │ flush_buffers_   │        │ to_thread      │
+                         │   │ periodically     │────────┘        │       │
+                         │   │ (background task)│                 ▼       │
+                         │   └──────────────────┘        ┌────────────────┐
+                         │                               │  Disk: per-    │
+   Prometheus  ◀─────────│  metrics HTTP server :8000    │  partition logs│
+                         │                               │  + KRaft meta  │
+                         └───────────────────────────────└────────────────┘
+```
+
+### Request lifecycle
+
+```
+TCP bytes
+   │
+   ▼
+client_handler                         (main.py)
+   │  read 4-byte length prefix  ─────────────────────┐
+   │  validate size (0 < n ≤ MAX_REQUEST_SIZE)        │ timeouts +
+   │  read exactly N payload bytes                    │ shutdown-aware
+   │  extract correlation_id = bytes[8:12]            │ waits
+   │  extract api_key         = bytes[4:6]  ──────────┘
+   ▼
+RequestHandler.handle_*                (handlers.py)   dispatch by api_key
+   │
+   ▼
+parser.parse_*                         (protocol/parser.py)
+   │  BufferReader walks the bytes → typed dataclass (messages.py)
+   ▼
+Storage                                (storage.py)
+   │  Produce → write_partition_log  → append to in-memory buffer
+   │  Fetch   → read_partition_log   → disk (seek/read max_bytes) + buffer merge
+   ▼
+BufferWriter                           (protocol/writer.py)
+   │  typed response fields → bytearray (compact strings/arrays, varints)
+   ▼
+client_handler
+   │  resp = len(corr_id + body) ‖ correlation_id ‖ resp_body
+   │  write + drain (retry up to MAX_WRITE_RETRIES)
+   ▼
+TCP bytes out
+
+(asynchronously, every BUFFER_FLUSH_INTERVAL seconds)
+flush_buffers_periodically → Storage.flush_buffers → write + flush + fsync to disk
+```
 
 ## Project Structure
 
 ```
 kafka-broker/
 ├── src/
-│   ├── main.py           # Server bootstrap, connection loop, metrics, shutdown
-│   ├── handlers.py       # RequestHandler — dispatches and processes each API
-│   ├── storage.py        # Storage — metadata loading, partition read/write/flush
-│   ├── utils.py          # encode_unsigned_varint helper
+│   ├── main.py              # Entry point: TCP server, framing, lifecycle,
+│   │                        #   signal handling, metrics, background flush task
+│   ├── handlers.py          # RequestHandler: one method per API key
+│   ├── storage.py           # Storage: metadata parsing, buffered writes,
+│   │                        #   merged reads, periodic flush
+│   ├── utils.py             # Shared helpers (unsigned varint encoding)
 │   └── protocol/
-│       ├── messages.py   # Dataclass definitions for all request types
-│       ├── parser.py     # Stateless request parsers (bytes → dataclass)
-│       ├── reader.py     # BufferReader — cursor-based binary deserializer
-│       └── writer.py     # BufferWriter — binary serializer
+│       ├── reader.py        # BufferReader: cursor-based deserializer
+│       ├── writer.py        # BufferWriter: appends to internal bytearray
+│       ├── parser.py        # Stateless parsing functions (bytes → dataclass)
+│       └── messages.py      # @dataclass request type definitions
 ├── requirements.txt
-└── mypy.ini
+└── README.md
 ```
 
----
+### Module responsibilities
+
+- **`main.py`** — Owns the network. Implements 4-byte length-prefix framing, extracts the correlation ID and API key directly from the raw bytes, dispatches to the handler, prepends the correlation ID to the response, and writes it back. Also wires up the connection semaphore, signal handlers, graceful shutdown, the periodic flush task, and the Prometheus endpoint.
+- **`handlers.py`** — `RequestHandler` has one `handle_*` method per API key. Each parses the request via the protocol layer, consults `Storage`, and builds the response body with a `BufferWriter`. Handlers return only `resp_body`; the correlation ID is prepended by the transport layer.
+- **`storage.py`** — `Storage` parses the KRaft `__cluster_metadata` log into a `topics` dict (and a `topics_by_uuid` index), buffers produced records per `(topic, partition)`, flushes them durably, and serves reads by merging disk and buffer.
+- **`protocol/`** — Self-contained (de)serialization. Compact strings/arrays use unsigned varints where the encoded value is `length + 1` (so `0` encodes null).
 
 ## Requirements
 
-- Python 3.11+
-- `structlog`
-- `prometheus-client`
+- **Python 3.10+** (the code uses modern typing syntax such as `dict[str, dict]` and `list[...]`).
+- Python dependencies (see `requirements.txt`):
+  - `structlog` — structured JSON logging
+  - `prometheus_client` — metrics exposition
+  - `mypy` — static type checking (development)
 
-Install dependencies:
+Install them with:
 
 ```bash
 pip install -r requirements.txt
 ```
 
----
+### Metadata prerequisite
 
-## Running the Broker
-
-```bash
-python -m src.main
-```
-
-The broker listens on:
-- **`localhost:9092`** — Kafka protocol (data plane)
-- **`localhost:8000`** — Prometheus metrics (metrics plane)
-
-### Expected log directories
-
-The broker reads KRaft cluster metadata from:
+`Fetch`, `Produce`, and `DescribeTopicPartitions` rely on cluster metadata read from a KRaft `__cluster_metadata` log at:
 
 ```
-/tmp/kraft-combined-logs/__cluster_metadata-0/00000000000000000000.log
+${LOG_FILES_DIR}/__cluster_metadata-0/00000000000000000000.log
 ```
 
-Partition logs are written to:
-
-```
-/tmp/kraft-combined-logs/<topic>-<partition>/00000000000000000000.log
-```
-
-These directories are created automatically on first write. To pre-seed metadata, place a valid KRaft `__cluster_metadata` log file at the path above before starting the broker.
-
----
+If this file is absent, the broker still starts and serves requests, but with an empty topic set (unknown-topic responses). Partition logs live alongside it at `${LOG_FILES_DIR}/<topic>-<partition>/00000000000000000000.log`.
 
 ## Configuration
 
-All constants are defined at the top of `src/main.py`:
+All tunables are module-level constants at the top of `src/main.py`:
 
 | Constant | Default | Description |
-|----------|---------|-------------|
-| `host_ip` | `localhost` | Bind address |
-| `host_port` | `9092` | Kafka protocol port |
-| `metrics_port` | `8000` | Prometheus metrics port |
+| --- | --- | --- |
+| `LOG_FILES_DIR` | `/tmp/kraft-combined-logs` | Root directory for all log files (metadata + partition logs) |
+| `LOG_FILE_NAME` | `00000000000000000000.log` | Per-partition log file name |
+| `CLIENT_READ_TIMEOUT` | `5` | Per-read timeout (seconds) |
+| `CLIENT_WRITE_TIMEOUT` | `5` | Per-write/drain timeout (seconds) |
+| `MAX_WRITE_RETRIES` | `3` | Max retries for a failed socket write |
 | `MAX_CONCURRENT_CONNECTIONS` | `100` | Connection semaphore limit |
-| `CLIENT_READ_TIMEOUT` | `5s` | Per-read timeout per connection |
-| `CLIENT_WRITE_TIMEOUT` | `5s` | Per-write timeout per connection |
-| `MAX_WRITE_RETRIES` | `3` | Response write retry attempts |
-| `GRACEFUL_SHUTDOWN_TIMEOUT` | `10s` | Drain window before force-cancel |
-| `BUFFER_FLUSH_INTERVAL` | `10s` | How often buffers are flushed to disk |
+| `GRACEFUL_SHUTDOWN_TIMEOUT` | `10.0` | Drain window on `SIGINT`/`SIGTERM` (seconds) |
+| `BUFFER_FLUSH_INTERVAL` | `10` | Seconds between background buffer flushes |
+| `MAX_REQUEST_SIZE` | `1024` | Maximum accepted request payload size (bytes) |
 
----
+Network ports are set in `main()`:
 
-## Architecture
+| Setting | Default | Description |
+| --- | --- | --- |
+| Broker host | `localhost` | TCP listen address |
+| Broker port | `9092` | Kafka wire-protocol port |
+| Metrics port | `8000` | Prometheus metrics HTTP endpoint |
 
-### Request lifecycle
+## Running the Broker
 
-```
-TCP bytes in
-  → client_handler          (4-byte length prefix framing)
-    → RequestHandler         (dispatch by api_key)
-      → parser.py            (bytes → typed request dataclass)
-      → Storage              (read or write partition log)
-      → BufferWriter         (typed response → bytes)
-  → TCP bytes out
-```
+Install dependencies and start the broker:
 
-### Write path
+```bash
+# Install dependencies
+pip install -r requirements.txt
 
-Produce requests are buffered in memory (`bytearray` per `(topic, partition)`) and never touch disk synchronously. A background task flushes all buffers to disk with `fsync` every 10 seconds. On failure, unwritten data is prepended back to the buffer and retried next cycle.
-
-### Read path
-
-Fetch requests seek directly to `fetch_offset` in the partition log file and read up to `max_bytes`. Any data buffered but not yet flushed is appended transparently so reads are always up-to-date.
-
-### Shutdown
-
-On `SIGINT` or `SIGTERM`:
-1. Stop accepting new connections
-2. Wait up to 10 seconds for active connections to finish
-3. Force-cancel any remaining connections
-4. Perform a final buffer flush to disk
-
----
-
-## Observability
-
-### Structured logging
-
-All log output is JSON via `structlog`, including `log_level`, `logger`, `timestamp`, and structured key-value fields:
-
-```json
-{"log_level": "info", "logger": "src.main", "timestamp": "2026-01-01T00:00:00Z", "event": "server_started", "host": "localhost", "port": 9092}
+# Run the broker (listens on localhost:9092, metrics on :8000)
+python -m src.main
 ```
 
-### Prometheus metrics
-
-Scraped at `http://localhost:8000/metrics`:
-
-| Metric | Type | Labels | Description |
-|--------|------|--------|-------------|
-| `kafka_server_requests_total` | Counter | `api_key`, `status` | Total requests by API and outcome |
-| `kafka_server_request_duration_seconds` | Histogram | `api_key` | Request latency per API |
-| `kafka_server_active_connections` | Gauge | — | Current open connections |
-| `kafka_server_disk_flush_duration_seconds` | Histogram | — | Buffer flush latency |
-
----
-
-## Type Checking
+Type check the source:
 
 ```bash
 mypy src/
 ```
 
-`mypy.ini` enables `check_untyped_defs = True` for full coverage.
+Once running, the broker:
+
+- Accepts Kafka protocol connections on `localhost:9092`.
+- Exposes Prometheus metrics at `http://localhost:8000/`.
+- Emits structured JSON logs to stdout.
+
+Shut it down with `Ctrl-C` (`SIGINT`) or `SIGTERM`; it will drain active connections and perform a final durable flush before exiting.
