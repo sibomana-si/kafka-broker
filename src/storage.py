@@ -209,26 +209,6 @@ class Storage:
         return await asyncio.to_thread(_read)
 
     @staticmethod
-    async def _write_file(file_path: str, data: bytes) -> None:
-        """
-        Writes binary data asynchronously to a specified file.
-
-        This method uses a separate thread to handle file-writing operations,
-        ensuring that the main event loop remains non-blocking.
-
-        :param file_path: The path to the file where data will be written.
-        :param data: The binary data to be written to the file.
-        :return: None
-        """
-
-        def _write():
-            with open(file_path, "wb") as f:
-                f.write(data)
-                f.flush()
-                os.fsync(f.fileno())
-        await asyncio.to_thread(_write)
-
-    @staticmethod
     async def _append_file(file_path: str, data: bytes) -> None:
         """
         Asynchronously appends binary data to a file.

@@ -200,7 +200,7 @@ async def client_handler(
                     writer.write(resp)
                     await asyncio.wait_for(writer.drain(), timeout=CLIENT_WRITE_TIMEOUT)
                     break
-                except (asyncio.TimeoutError, ConnectionError) as e:
+                except (asyncio.TimeoutError, ConnectionError, RuntimeError, OSError) as e:
                     log.warning("write_attempt_failed", attempt=attempt + 1, error=str(e))
                     if attempt == MAX_WRITE_RETRIES - 1:
                         log.error("max_write_retries_reached")
@@ -229,9 +229,7 @@ async def flush_buffers_periodically(storage: Storage, shutdown_event: asyncio.E
 
     :param storage: The storage instance with the buffers to flush.
     :param shutdown_event: The event that signals the server to shut down.
-    :param storage:
-    :param shutdown_event:
-    :return:
+    :return: None
     """
 
     while not shutdown_event.is_set():

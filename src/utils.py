@@ -17,22 +17,3 @@ def encode_unsigned_varint(value: int) -> bytes:
         value >>= 7
     res.append(value)
     return bytes(res)
-
-def varint_encoding_size(request: bytes, index: int) -> int:
-    """
-    Calculate the size, in bytes, of a variable-length integer encoded within a byte sequence.
-
-    This function determines the number of bytes consumed by a varint encoding, starting
-    from a specified index in the byte sequence. A varint is a compact, variable-length
-    encoding for integers commonly used in serialization formats.
-
-    :param request: A sequence of bytes containing the varint encoding.
-    :param index: The starting index in the byte sequence to read the varint from.
-    :return: The number of bytes used to encode the varint.
-    """
-
-    num_bytes = 1
-    while request[index] & 0x80:
-        num_bytes += 1
-        index += 1
-    return num_bytes

@@ -1,5 +1,5 @@
 import pytest
-from src.utils import encode_unsigned_varint, varint_encoding_size
+from src.utils import encode_unsigned_varint
 
 
 class TestEncodeUnsignedVarint:
@@ -47,54 +47,3 @@ class TestEncodeUnsignedVarint:
         with pytest.raises(ValueError):
             encode_unsigned_varint(value)
 
-
-class TestVarintEncodingSize:
-    @pytest.mark.parametrize("data, index, expected", [
-        (b'\x00',                   0, 1),
-        (b'\x7f',                   0, 1),
-        (b'\x80\x01',               0, 2),
-        (b'\xff\x7f',               0, 2),
-        (b'\x80\x80\x01',           0, 3),
-        (b'\xff\xff\x7f',           0, 3),
-        (b'\x80\x80\x80\x80\x01',  0, 5),
-        # mid-buffer: skip a leading 0x00 byte, read a two-byte varint
-        (b'\x00\x80\x01\x00',       1, 2),
-        # adjacent varints: first is single-byte, second starts at index 1
-        (b'\x01\x80\x01',           1, 2),
-        # single-byte varint at the last position of a larger buffer
-        (b'\x00\x00\x7f',           2, 1),
-    ])
-    def test_known_sizes(self, data: bytes, index: int, expected: int) -> None:
-        assert varint_encoding_size(data, index) == expected
-
-    def test_single_byte_standalone(self) -> None:
-        assert varint_encoding_size(b'\x42', 0) == 1
-
-    def test_returns_int(self) -> None:
-        assert isinstance(varint_encoding_size(b'\x01', 0), int)
-
-    def test_index_out_of_bounds_raises(self) -> None:
-        with pytest.raises(IndexError):
-            varint_encoding_size(b'\x01', 5)
-
-    def test_truncated_varint_raises(self) -> None:
-        # All bytes have the continuation bit set — the sequence never terminates
-        with pytest.raises(IndexError):
-            varint_encoding_size(b'\x80\x80\x80', 0)
-
-
-class TestRoundTrip:
-    @pytest.mark.parametrize("value", [
-        0, 1, 127, 128, 16383, 16384, 2097151, 2097152,
-        2**28, 2**32 - 1,
-    ])
-    def test_size_matches_encoded_length(self, value: int) -> None:
-        encoded = encode_unsigned_varint(value)
-        assert varint_encoding_size(encoded, 0) == len(encoded)
-
-    @pytest.mark.parametrize("value", [0, 127, 128, 16384, 2097152])
-    def test_size_matches_at_nonzero_offset(self, value: int) -> None:
-        prefix = b'\x00\xff'
-        encoded = encode_unsigned_varint(value)
-        buffer = prefix + encoded + b'\x00'
-        assert varint_encoding_size(buffer, len(prefix)) == len(encoded)
