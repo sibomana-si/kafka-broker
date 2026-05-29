@@ -9,6 +9,8 @@ class BufferReader:
         self.offset = offset
 
     def read_bytes(self, num_bytes: int) -> bytes:
+        if num_bytes < 0:
+            raise ValueError(f"negative read length: {num_bytes}")
         data = self.buffer[self.offset : self.offset + num_bytes]
         self.offset += num_bytes
         return data
