@@ -64,20 +64,18 @@ class Storage:
                     return f.read(max_bytes)
             return b""
 
-        try:
-            disk_data = await asyncio.to_thread(_read_chunk)
-        except Exception as e:
-            logger.error("failed_to_read_from_disk_partition_log", log_file=log_file, error=str(e), exc_info=True)
-
         buffer_key = (topic_name, partition_index)
         async with self.buffer_lock:
+            file_size = await asyncio.to_thread(lambda: path.stat().st_size if path.is_file() else 0)
+            try:
+                disk_data = await asyncio.to_thread(_read_chunk) # reads up to max_bytes from fetch_offset
+            except Exception as e:
+                logger.error("failed_to_read_from_disk_partition_log", log_file=log_file, error=str(e), exc_info=True)
             buffer_data = bytes(self.buffers.get(buffer_key, bytearray()))
 
         # For the memory buffer, we also need to respect offset and max_bytes.
         # fetch_offset refers to disk bytes. Since the buffer represents newly appended bytes,
         # we adjust the offset relative to the current file size.
-
-        file_size = await asyncio.to_thread(lambda: path.stat().st_size if path.is_file() else 0)
 
         if fetch_offset >= file_size:
             # If the fetch offset is beyond the disk file, we only read from the buffer.
