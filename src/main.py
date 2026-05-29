@@ -35,6 +35,7 @@ MAX_WRITE_RETRIES = 3
 MAX_CONCURRENT_CONNECTIONS = 100
 GRACEFUL_SHUTDOWN_TIMEOUT = 10.0
 BUFFER_FLUSH_INTERVAL = 10 # Flush buffer every 10 seconds
+MAX_REQUEST_SIZE = 1024
 
 # Reverse lookup for metrics
 API_KEY_NAMES = {
@@ -123,6 +124,10 @@ async def client_handler(
                     break
 
                 msg_size = int.from_bytes(size_bytes, byteorder="big")
+
+                if msg_size <= 0 or msg_size > MAX_REQUEST_SIZE:
+                    log.warning("invalid_message_size", msg_size=msg_size)
+                    break
 
                 # Read exactly msg_size bytes for the payload
                 payload_task = asyncio.create_task(reader.readexactly(msg_size))
