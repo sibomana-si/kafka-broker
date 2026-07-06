@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 import structlog
 
+
 logger = structlog.get_logger(__name__)
 
 
@@ -14,6 +15,10 @@ class Storage:
         self.log_file_name = log_file_name
         self.buffers: dict[tuple[str, int], bytearray] = {}
         self.buffer_lock = asyncio.Lock()
+        # Tracks the committed on-disk size per partition so reads can snapshot
+        # state (disk size + buffer) under the lock without doing disk I/O,
+        # then read the immutable on-disk bytes outside the lock.
+        self.disk_sizes: dict[tuple[str, int], int] = {}
 
     async def load_metadata(self) -> dict[str, dict[str, Any]]:
         """
@@ -56,22 +61,36 @@ class Storage:
         log_file = f"{self.log_dir}/{topic_name}-{partition_index}/{self.log_file_name}"
         path = Path(log_file)
         disk_data = b""
+        buffer_key = (topic_name, partition_index)
 
-        def _read_chunk():
-            if path.is_file() and path.stat().st_size > 0:
+        # Lazily learn the on-disk size for partitions persisted by a previous run.
+        # setdefault never clobbers a value a concurrent flush may have just set.
+        if buffer_key not in self.disk_sizes:
+            actual = await asyncio.to_thread(lambda: path.stat().st_size if path.is_file() else 0)
+            async with self.buffer_lock:
+                self.disk_sizes.setdefault(buffer_key, actual)
+
+        # Critical section is in-memory only (no I/O, no await), so it is never
+        # contended - concurrent fetches no longer serialize on each other.
+        async with self.buffer_lock:
+            file_size = self.disk_sizes.get(buffer_key, 0)
+            buffer_data = bytes(self.buffers.get(buffer_key, bytearray()))
+
+        # Disk read happens OUTSIDE the lock. We only read bytes [0, file_size],
+        # which are immutable (the log is append-only), so the result stays
+        # consistent with the buffer snapshot taken above.
+        if fetch_offset < file_size:
+            read_len = min(max_bytes, file_size - fetch_offset)
+
+            def _read_chunk():
                 with open(log_file, "rb") as f:
                     f.seek(fetch_offset)
-                    return f.read(max_bytes)
-            return b""
+                    return f.read(read_len)
 
-        buffer_key = (topic_name, partition_index)
-        async with self.buffer_lock:
-            file_size = await asyncio.to_thread(lambda: path.stat().st_size if path.is_file() else 0)
             try:
-                disk_data = await asyncio.to_thread(_read_chunk) # reads up to max_bytes from fetch_offset
+                disk_data = await asyncio.to_thread(_read_chunk)
             except Exception as e:
                 logger.error("failed_to_read_from_disk_partition_log", log_file=log_file, error=str(e), exc_info=True)
-            buffer_data = bytes(self.buffers.get(buffer_key, bytearray()))
 
         # For the memory buffer, we also need to respect offset and max_bytes.
         # fetch_offset refers to disk bytes. Since the buffer represents newly appended bytes,
@@ -136,6 +155,12 @@ class Storage:
             try:
                 await asyncio.to_thread(os.makedirs, log_dir, exist_ok=True)
                 await self._append_file(log_file, bytes(data))
+                # Publish the new committed on-disk size so subsequent reads see
+                # the flushed bytes. Authoritative (stat) so it is correct even
+                # for partitions persisted by a previous run.
+                new_size = await asyncio.to_thread(lambda: Path(log_file).stat().st_size)
+                async with self.buffer_lock:
+                    self.disk_sizes[(topic_name, partition_index)] = new_size
             except Exception as e:
                 logger.error(
                     "failed_to_flush_buffer_to_disk",

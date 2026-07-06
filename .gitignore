@@ -1,3 +1,4 @@
 .idea/
 mypy.ini
 *__pycache__/
+docs/
