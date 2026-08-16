@@ -3,11 +3,19 @@ import signal
 import time
 from asyncio import StreamReader, StreamWriter, Server
 from typing import Any
+import logging
 import structlog
 from prometheus_client import start_http_server, Counter, Histogram, Gauge
 
 from src.storage import Storage
 from src.handlers import RequestHandler
+
+# Configure stdlib logging
+logging.basicConfig(
+    format="%(message)s",
+    filename="kafka_broker.log",
+    level=logging.INFO,
+)
 
 # Configure structlog for JSON output
 structlog.configure(
