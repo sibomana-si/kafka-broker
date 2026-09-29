@@ -20,7 +20,7 @@ to a buffered, fsync-durable storage layer, all behind a single
 > shutdown, semaphore admission control, per-operation timeouts, batched
 > flush+fsync durability with no-loss failure recovery, structured JSON
 > logging, Prometheus metrics, a 457-test suite, and a benchmark-driven
-> read-path optimization that lifted fetch throughput 3.35x.
+> read-path optimization that lifted fetch throughput 2.5x.
 
 ---
 
@@ -441,16 +441,15 @@ events: `connection_accepted`, `client_read_timeout`,
 Measured with a custom wire-protocol benchmark driving the broker's own
 connection handler with real Kafka frames.
 
-- **Write path:** ~10,800 produce req/s at p99 < 5 ms across 50 concurrent
+- **Write path:** ~10,900 produce req/s at p99 < 5 ms across 50 concurrent
   connections; produces are acknowledged from memory and batched to disk
   every 10 s, so there is no disk I/O in the request path.
-- **Read path:** the original fetch path serialized behind a read lock that
-  held disk I/O in its critical section; throughput peaked at a single
-  connection and p99 reached 53 ms at 100 connections. Restructuring reads
-  to snapshot the committed disk size in memory and read the append-only log
-  lock-free improved fetch throughput **3.35x** (2,853 → 9,549 req/s at 50
-  connections) and p99 latency **~5x** (26.5 → 5.5 ms), lifting fetch from
-  17% to 56% of the broker's measured protocol ceiling (~17k req/s for a
+- **Read path:** the original fetch path serialized behind a read lock 
+  held across thread-pool file-system calls. Restructuring the read path 
+  to snapshot committed log size in memory and read the append-only log outside
+  the lock improved fetch throughput **2.5x** (3,826 → 9,615 req/s at 50
+  connections) and p99 latency **3.2x** (16.9 → 5.3 ms), lifting fetch from
+  22% to 56% of the broker's measured protocol ceiling (~17k req/s for a
   storage-free request) and making reads scale with concurrency.
 
 ---
